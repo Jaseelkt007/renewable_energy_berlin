@@ -1,0 +1,242 @@
+{
+  "3D_Modell Brandenburg.glb": {
+    "file": "3D_Modell Brandenburg.glb",
+    "primitive_count": 70,
+    "vertex_count": 185550,
+    "face_count": 207374,
+    "extensions_required": [
+      "KHR_draco_mesh_compression"
+    ],
+    "rtc_center": [
+      403101.0,
+      5907435.0,
+      0.0
+    ],
+    "bbox_min_local": [
+      -68.5796890258789,
+      -135.28640747070312,
+      33.13402557373047
+    ],
+    "bbox_max_local": [
+      131.29782104492188,
+      106.29759216308594,
+      79.10398864746094
+    ],
+    "extent": [
+      199.87751007080078,
+      241.58399963378906,
+      45.96996307373047
+    ],
+    "units": "meters",
+    "unit_scale_applied": 1.0,
+    "up_axis": "Z",
+    "original_to_normalized_matrix": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "preview_png": "out/3D_Modell Brandenburg.topdown.png",
+    "notes": "Photogrammetry tile in local meters with CESIUM_RTC offset. Tile may contain multiple buildings; building selection happens downstream."
+  },
+  "3D_Modell Hamburg.glb": {
+    "file": "3D_Modell Hamburg.glb",
+    "primitive_count": 27,
+    "vertex_count": 151682,
+    "face_count": 186415,
+    "extensions_required": [
+      "KHR_draco_mesh_compression"
+    ],
+    "rtc_center": [
+      557311.0,
+      5907722.0,
+      0.0
+    ],
+    "bbox_min_local": [
+      -56.77276611328125,
+      -63.61896896362305,
+      33.3101692199707
+    ],
+    "bbox_max_local": [
+      72.88379669189453,
+      65.0522689819336,
+      52.819236755371094
+    ],
+    "extent": [
+      129.65656280517578,
+      128.67123794555664,
+      19.50906753540039
+    ],
+    "units": "meters",
+    "unit_scale_applied": 1.0,
+    "up_axis": "Z",
+    "original_to_normalized_matrix": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "preview_png": "out/3D_Modell Hamburg.topdown.png",
+    "notes": "Photogrammetry tile in local meters with CESIUM_RTC offset. Tile may contain multiple buildings; building selection happens downstream."
+  },
+  "3D_Modell North Germany.glb": {
+    "file": "3D_Modell North Germany.glb",
+    "primitive_count": 28,
+    "vertex_count": 184496,
+    "face_count": 238125,
+    "extensions_required": [
+      "KHR_draco_mesh_compression"
+    ],
+    "rtc_center": [
+      563871.0,
+      5916423.0,
+      0.0
+    ],
+    "bbox_min_local": [
+      -53.74300003051758,
+      -47.47011947631836,
+      38.90906524658203
+    ],
+    "bbox_max_local": [
+      54.90969467163086,
+      58.765472412109375,
+      69.10467529296875
+    ],
+    "extent": [
+      108.65269470214844,
+      106.23559188842773,
+      30.19561004638672
+    ],
+    "units": "meters",
+    "unit_scale_applied": 1.0,
+    "up_axis": "Z",
+    "original_to_normalized_matrix": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "preview_png": "out/3D_Modell North Germany.topdown.png",
+    "notes": "Photogrammetry tile in local meters with CESIUM_RTC offset. Tile may contain multiple buildings; building selection happens downstream."
+  },
+  "3D_Modell Ruhr.glb": {
+    "file": "3D_Modell Ruhr.glb",
+    "primitive_count": 44,
+    "vertex_count": 197512,
+    "face_count": 254625,
+    "extensions_required": [
+      "KHR_draco_mesh_compression"
+    ],
+    "rtc_center": [
+      367733.0,
+      5667706.0,
+      0.0
+    ],
+    "bbox_min_local": [
+      -35.74482345581055,
+      -52.465606689453125,
+      171.35592651367188
+    ],
+    "bbox_max_local": [
+      40.46892547607422,
+      32.49068069458008,
+      195.50701904296875
+    ],
+    "extent": [
+      76.21374893188477,
+      84.9562873840332,
+      24.151092529296875
+    ],
+    "units": "meters",
+    "unit_scale_applied": 1.0,
+    "up_axis": "Z",
+    "original_to_normalized_matrix": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "preview_png": "out/3D_Modell Ruhr.topdown.png",
+    "notes": "Photogrammetry tile in local meters with CESIUM_RTC offset. Tile may contain multiple buildings; building selection happens downstream."
+  }
+}

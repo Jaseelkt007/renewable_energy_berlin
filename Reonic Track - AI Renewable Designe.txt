@@ -1,0 +1,20 @@
+Reonic Track - AI Renewable Designer
+
+Context
+Designing renewable energy systems for individual customers is one of the most time-consuming parts of the installation process. Every home is different, and installers spend hours tailoring each proposal. Time that could otherwise be spent on actual installations.
+Your Goal
+Build an AI-powered solution that generates renewable energy system designs for residential customers. Given basic project inputs from an installer or customer, the system should propose a complete setup that combines PV, battery storage, and heat pumps as appropriate. The user should be allowed to refine the design afterwards.
+
+What we want you to play with
+Use the demand profile to estimate how many modules the household needs (this is not very critical since it’s also a customer choice—in doubt just fill the roof up).
+Use the photogrammetry models (find the models here) and build something to detect the roof spaces and obstructions, and place modules on the roof automatically. If that’s too hard, build something that estimates the space available and estimates how many modules would fit.
+You can also try with https://developers.google.com/maps/documentation/tile/3d-tiles. we will refund you if you incur a cost for this — just let us know!
+We’ve given you a long list of projects planned by our customers. These’ll give you information on a set of projects. Each project can have multiple options/variants. Each variant has a set of components that were actually sold/planned.
+Based on the number of modules that you could place on the photogrammetry model (see above), figure out what an offer for the customer should look like.
+Have fun! If there’s another approach or something else you’d like to build that’s directionally in the same space, that is more than fair game to try.
+
+Prize
+2,501€, Reonic care package, team dinner with a founder and team leads
+
+Questions?
+Write your questions into the #reonic Discord-Channel

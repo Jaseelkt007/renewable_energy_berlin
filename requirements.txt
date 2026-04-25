@@ -1,0 +1,9 @@
+trimesh>=4.4
+numpy>=1.26
+pillow>=10.0
+networkx>=3.0
+scipy>=1.11
+DracoPy>=1.4
+pygltflib>=1.16
+matplotlib>=3.8
+pydantic>=2.6
