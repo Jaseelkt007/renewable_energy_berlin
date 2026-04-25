@@ -1,15 +1,24 @@
 """Reusable plane axis math + greedy panel grid placer.
 
-Used by emit_manual.py (M3) for hand-tuned rectangular roofs and reused later by
-the auto pipeline (M5-M7), which will pass detected polygons instead of fixed
-rectangles. The math up to `build_axes` is identical in both paths.
+Used in two places:
+
+  * `place_panels_in_rect`  — M3 hand-tuned rectangular roofs (manual_config).
+  * `place_panels_in_polygon` — M7 auto pipeline that fills the
+    M6 usable polygon (which may have holes from bumps and may be
+    non-rectangular from alpha-shape boundary fitting).
+
+The plane axis math (`build_axes`) and the actual rectangle-tiling logic are
+shared; the difference is just whether the containment test is a fixed (u, v)
+bound check or `shapely.Polygon.contains(rect)`.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from math import cos, radians, sin
+from typing import TYPE_CHECKING
 
 import numpy as np
+import shapely.geometry as sg
 
 from roof3d.contract import (
     ConfidenceReasons,
@@ -17,6 +26,10 @@ from roof3d.contract import (
     Panel,
     RoofPlane,
 )
+
+if TYPE_CHECKING:
+    from roof3d.planes import DetectedPlane
+    from roof3d.usable import UsableResult
 
 
 @dataclass(frozen=True)
@@ -168,3 +181,159 @@ def _grid_fill(
         if len(panels) > len(best):
             best = panels
     return best
+
+
+# ---------------------------------------------------------------------------
+# M7 — polygon-aware placement
+# ---------------------------------------------------------------------------
+
+
+def place_panels_in_polygon(
+    plane_id: str,
+    plane: "DetectedPlane",
+    usable: "UsableResult",
+    module: ModuleSpec = ModuleSpec(),
+    source: str = "auto",
+) -> tuple[RoofPlane, list[Panel], list[Obstruction]]:
+    """Fill the plane's usable polygon with module rectangles.
+
+    Returns a ready-to-serialise contract.RoofPlane, the list of Panels, and
+    obstructions (eaves reserve + any bumps from M6). All coordinates are in
+    the original GLB local space (RTC offset NOT applied), with each panel's
+    corners lifted by `module.lift_m` along the plane normal to avoid z-fight.
+    """
+    if usable.usable_polygon is None or usable.usable_polygon.is_empty:
+        panels: list[Panel] = []
+    else:
+        panels = _grid_fill_polygon(plane, usable.usable_polygon, module, plane_id)
+
+    contract_plane = _detected_to_contract_plane(
+        plane, usable, panel_count=len(panels),
+        plane_id_override=plane_id, source=source,
+    )
+
+    obstructions: list[Obstruction] = []
+    for b in usable.bumps:
+        obstructions.append(Obstruction(
+            id=b.bump_id,
+            plane_id=plane_id,
+            source="detected_bump",
+            type="obstruction",
+            area_m2=b.area_m2,
+            polygon_3d=list(b.polygon_3d),
+        ))
+    eaves_area = max(0.0,
+                     usable.raw_area_m2 - usable.usable_area_m2 - sum(b.area_m2 for b in usable.bumps))
+    if eaves_area > 0.5:
+        obstructions.append(Obstruction(
+            id=f"obs_{plane_id}_eaves",
+            plane_id=plane_id,
+            source="reserve",
+            type="safety_margin",
+            area_m2=eaves_area,
+            polygon_3d=[],
+        ))
+
+    return contract_plane, panels, obstructions
+
+
+def _grid_fill_polygon(
+    plane: "DetectedPlane",
+    polygon: sg.Polygon,
+    module: ModuleSpec,
+    plane_id: str,
+) -> list[Panel]:
+    minu, minv, maxu, maxv = polygon.bounds
+    best: list[Panel] = []
+
+    for orient in ("portrait", "landscape"):
+        if orient == "portrait":
+            pw, ph = module.width_m, module.height_m
+        else:
+            pw, ph = module.height_m, module.width_m
+
+        step_u = pw + module.gap_m
+        step_v = ph + module.gap_m
+        n_cols = max(0, int(((maxu - minu) - module.gap_m) // step_u))
+        n_rows = max(0, int(((maxv - minv) - module.gap_m) // step_v))
+        if n_cols == 0 or n_rows == 0:
+            continue
+
+        grid_w = n_cols * pw + (n_cols - 1) * module.gap_m
+        grid_h = n_rows * ph + (n_rows - 1) * module.gap_m
+        u0 = minu + ((maxu - minu) - grid_w) / 2.0 + pw / 2.0
+        v0 = minv + ((maxv - minv) - grid_h) / 2.0 + ph / 2.0
+
+        candidates: list[Panel] = []
+        for r in range(n_rows):
+            for c in range(n_cols):
+                cu = u0 + c * step_u
+                cv = v0 + r * step_v
+                corners_uv = [
+                    (cu - pw / 2, cv - ph / 2),
+                    (cu + pw / 2, cv - ph / 2),
+                    (cu + pw / 2, cv + ph / 2),
+                    (cu - pw / 2, cv + ph / 2),
+                ]
+                rect = sg.Polygon(corners_uv)
+                if not polygon.contains(rect):
+                    continue
+                pc = (plane.centroid
+                      + cu * plane.u_axis + cv * plane.v_axis
+                      + module.lift_m * plane.normal)
+                corners_3d = [
+                    tuple((plane.centroid
+                           + u * plane.u_axis + v * plane.v_axis
+                           + module.lift_m * plane.normal).tolist())
+                    for (u, v) in corners_uv
+                ]
+                candidates.append(Panel(
+                    id=f"{plane_id}_p{r}_{c}",
+                    plane_id=plane_id,
+                    center=tuple(pc.tolist()),
+                    normal=tuple(plane.normal.tolist()),
+                    u_axis=tuple(plane.u_axis.tolist()),
+                    v_axis=tuple(plane.v_axis.tolist()),
+                    width_m=pw,
+                    height_m=ph,
+                    watt_peak=module.watt_peak,
+                    corners_3d=corners_3d,
+                ))
+        if len(candidates) > len(best):
+            best = candidates
+    return best
+
+
+def _detected_to_contract_plane(
+    plane: "DetectedPlane",
+    usable: "UsableResult",
+    panel_count: int,
+    plane_id_override: str,
+    source: str,
+) -> RoofPlane:
+    reasons = plane.confidence_reasons
+    return RoofPlane(
+        id=plane_id_override,
+        source=source,
+        confidence=plane.confidence,
+        confidence_reasons=ConfidenceReasons(
+            area_large_enough=bool(reasons.get("area_large_enough", True)),
+            normal_stable=bool(reasons.get("normal_stable", True)),
+            # The contract field "height_valid" carries M5's "substantive" signal
+            # (plane has enough faces to be a real roof rather than a fragment).
+            # M4's local-cell-max filter already enforces actual height.
+            height_valid=bool(reasons.get("substantive", True)),
+            polygon_clean=bool(reasons.get("polygon_clean", True)),
+        ),
+        centroid=tuple(plane.centroid.tolist()),
+        normal=tuple(plane.normal.tolist()),
+        u_axis=tuple(plane.u_axis.tolist()),
+        v_axis=tuple(plane.v_axis.tolist()),
+        tilt_deg=plane.tilt_deg,
+        azimuth_deg=plane.azimuth_deg,
+        area_m2=plane.area_m2,
+        usable_area_m2=usable.usable_area_m2,
+        panel_count=panel_count,
+        polygon_3d=[tuple(p) for p in usable.raw_polygon_3d],
+        usable_polygon_3d=[tuple(p) for p in usable.usable_polygon_3d],
+    )

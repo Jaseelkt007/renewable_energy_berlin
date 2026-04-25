@@ -2,7 +2,28 @@
   "permissions": {
     "allow": [
       "Bash(.venv/bin/python *)",
-      "Bash(.venv/bin/pip install *)"
+      "Bash(.venv/bin/pip install *)",
+      "Bash(python3 -m venv .venv)",
+      "Bash(.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8001 --log-level warning)",
+      "Bash(curl -sS http://127.0.0.1:8001/api/health)",
+      "Bash(curl -sS http://127.0.0.1:8001/api/projects)",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -sS -o /dev/null -w \"roof status=%{http_code} bytes=%{size_download}\\\\n\" \"http://127.0.0.1:8001/api/projects/297be54c5e7e4aad/roof\")",
+      "Bash(curl -sS -o /dev/null -w \"model status=%{http_code} bytes=%{size_download} type=%{content_type}\\\\n\" \"http://127.0.0.1:8001/api/projects/297be54c5e7e4aad/model\")",
+      "Bash(curl -sS -o /dev/null -w \"404 status=%{http_code}\\\\n\" \"http://127.0.0.1:8001/api/projects/bogus/roof\")",
+      "Bash(kill %1)",
+      "Bash(pkill -f \"uvicorn main:app\")",
+      "Bash(/mnt/d/Berlin_hackathon/viewer_app/backend/.venv/bin/uvicorn main:app *)",
+      "Bash(curl -sS http://127.0.0.1:8002/api/health)",
+      "Bash(curl -sS -m 2 http://127.0.0.1:8001/api/health)",
+      "Bash(pkill -9 -f \"uvicorn main:app\")",
+      "Bash(curl -sS -m 1 http://127.0.0.1:8001/api/health)",
+      "Bash(curl -sS -m 1 http://127.0.0.1:8002/api/health)",
+      "Bash(curl -sS -i -X OPTIONS http://127.0.0.1:8001/api/projects/297be54c5e7e4aad/seed -H 'Origin: http://localhost:3000' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type')",
+      "Bash(curl -sS -i -X OPTIONS http://127.0.0.1:8001/api/projects/297be54c5e7e4aad/seed -H \"Origin: http://localhost:3000\" -H \"Access-Control-Request-Method: POST\" -H \"Access-Control-Request-Headers: content-type\")",
+      "Bash(curl *)",
+      "Bash(/mnt/d/Berlin_hackathon/viewer_app/backend/.venv/bin/uvicorn *)",
+      "Bash(pkill -9 -f \"uvicorn --app-dir\")"
     ]
   }
 }

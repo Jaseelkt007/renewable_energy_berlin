@@ -1,0 +1,34 @@
+[
+  {
+    "project_id": "297be54c5e7e4aad",
+    "label": "Hamburg (real CSV project)",
+    "model_file": "3D_Modell Hamburg.glb",
+    "roof_json": "out/297be54c5e7e4aad.roof.json",
+    "mode": "auto",
+    "note": "Real customer profile from projects_status_quo.csv (4500 kWh/yr). Tile-wide auto result; M9 binding done, per-house selection still TODO."
+  },
+  {
+    "project_id": "98b53eaa68c0eeeb",
+    "label": "Brandenburg (real CSV project, EV)",
+    "model_file": "3D_Modell Brandenburg.glb",
+    "roof_json": "out/98b53eaa68c0eeeb.roof.json",
+    "mode": "auto",
+    "note": "Real customer profile from projects_status_quo.csv (6000 kWh/yr + EV). Tile-wide auto result; per-house selection still TODO."
+  },
+  {
+    "project_id": "demo_north",
+    "label": "North Germany (showcase tile)",
+    "model_file": "3D_Modell North Germany.glb",
+    "roof_json": "out/demo_north.roof.json",
+    "mode": "auto",
+    "note": "Showcase tile, no real CSV project bound."
+  },
+  {
+    "project_id": "demo_ruhr",
+    "label": "Ruhr (showcase tile)",
+    "model_file": "3D_Modell Ruhr.glb",
+    "roof_json": "out/demo_ruhr.roof.json",
+    "mode": "auto",
+    "note": "Showcase tile, no real CSV project bound."
+  }
+]

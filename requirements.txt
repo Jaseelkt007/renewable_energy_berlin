@@ -7,3 +7,6 @@ DracoPy>=1.4
 pygltflib>=1.16
 matplotlib>=3.8
 pydantic>=2.6
+scikit-learn>=1.4
+shapely>=2.0
+alphashape>=1.3
