@@ -4876,7 +4876,9 @@
     },
     "method": "auto_normal_cluster",
     "confidence": 1.0,
-    "warnings": []
+    "warnings": [
+      "Tile-wide result: multiple buildings may be included."
+    ]
   },
   "quality": {
     "method": "auto_normal_cluster",

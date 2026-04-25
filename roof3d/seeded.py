@@ -17,10 +17,17 @@ from typing import Optional
 import numpy as np
 import trimesh
 
-from roof3d.candidates import _smooth_normals
+from roof3d.assemble import AssembledDesign, planes_to_contract
+from roof3d.candidates import CandidateResult, _smooth_normals
 from roof3d.contract import Obstruction, Panel, RoofPlane
 from roof3d.placement import ModuleSpec, place_panels_in_polygon
-from roof3d.planes import DetectedPlane, _build_plane
+from roof3d.planes import DetectedPlane, _build_plane, cluster_planes
+from roof3d.quality import (
+    GateParams,
+    Selection,
+    apply_quality_gate,
+    summarise_decisions,
+)
 from roof3d.usable import compute_usable
 
 # Region-grow tuning
@@ -160,4 +167,141 @@ def design_for_seed(
         panels=panels,
         obstructions=obstructions,
         n_faces=int(len(detected.face_indices)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# M11 — interactive ROI-driven design (full M4..M7 pipeline on a marked region)
+# ---------------------------------------------------------------------------
+
+# Smallest candidate count we'll send into M5 from an ROI. Below this, the
+# clustering thresholds (MIN_PLANE_FACES=30 in M5) reliably yield zero planes,
+# and a fast 422 from the caller is much friendlier than a vague empty result.
+ROI_MIN_CANDIDATES = 30
+
+
+class RoiTooSmall(ValueError):
+    """Raised when the ROI mask leaves too few candidate faces for M5 to work.
+
+    The caller (HTTP endpoint) should map this to a 422 with an actionable
+    message — typically "click closer to the roof centre or increase the
+    radius".
+    """
+
+
+@dataclass
+class RoiDesignResult:
+    """Full pipeline result for an interactive ROI request.
+
+    Mirrors the per-project AssembledDesign shape but adds diagnostics the
+    frontend uses to display loading state / fallback hints.
+    """
+    assembled: AssembledDesign
+    n_candidates_in_roi: int
+    n_planes_detected: int
+    n_planes_accepted: int
+
+
+def _roi_circle_mask(centroids: np.ndarray, center_xy, radius_m: float) -> np.ndarray:
+    """Boolean mask over face indices: centroid XY within `radius_m` of center."""
+    cx = float(center_xy[0])
+    cy = float(center_xy[1])
+    dx = centroids[:, 0] - cx
+    dy = centroids[:, 1] - cy
+    return (dx * dx + dy * dy) <= (float(radius_m) * float(radius_m))
+
+
+def design_for_roi(
+    mesh: trimesh.Trimesh,
+    candidate_result: CandidateResult,
+    *,
+    roi_center_xy,
+    roi_radius_m: float,
+    gate_params: Optional[GateParams] = None,
+    module: ModuleSpec = ModuleSpec(),
+    max_planes: int = 12,
+    min_usable_area_m2: float = 4.0,
+    detect_bumps: bool = True,
+) -> RoiDesignResult:
+    """Run M4 (mask) -> M5 -> M10 gate -> M6 -> M7 restricted to an XY circle.
+
+    Inputs:
+        mesh              — full GLB mesh (NOT submeshed; face_adjacency stays
+                            intact so M5's connected-components step is correct
+                            across the ROI boundary).
+        candidate_result  — output of `select_roof_candidates(mesh)`. The caller
+                            is expected to cache this per project.
+        roi_center_xy     — (x, y) in GLB local space.
+        roi_radius_m      — radius of the selection circle (meters).
+        gate_params       — optional override for M10 gate (e.g. lowered
+                            min_height_above_ground_m for plateau projects).
+
+    Raises RoiTooSmall if fewer than ROI_MIN_CANDIDATES candidate faces fall
+    inside the circle — surfaced as 422 by the HTTP layer.
+    """
+    if candidate_result.mask.size == 0:
+        raise RoiTooSmall("mesh has no candidate faces")
+
+    # Mask candidates by ROI XY-distance. Keep the same CandidateResult shape
+    # (cluster_planes only reads `.mask`, `.face_normals`, `.face_centroids`).
+    roi_mask = _roi_circle_mask(candidate_result.face_centroids, roi_center_xy, roi_radius_m)
+    combined_mask = candidate_result.mask & roi_mask
+    n_in_roi = int(combined_mask.sum())
+    if n_in_roi < ROI_MIN_CANDIDATES:
+        raise RoiTooSmall(
+            f"ROI contains {n_in_roi} candidate faces "
+            f"(need >= {ROI_MIN_CANDIDATES}); try a larger radius "
+            "or click closer to the roof centre"
+        )
+
+    roi_cand = CandidateResult(
+        mask=combined_mask,
+        face_centroids=candidate_result.face_centroids,
+        face_normals=candidate_result.face_normals,
+        face_areas=candidate_result.face_areas,
+        cell_max_z=candidate_result.cell_max_z,
+        rejection_reasons={
+            **candidate_result.rejection_reasons,
+            "kept_in_roi": n_in_roi,
+        },
+    )
+
+    detected = cluster_planes(mesh, roi_cand)
+    n_detected = len(detected)
+
+    selection = Selection(
+        mode="roi_circle",
+        center_xy=(float(roi_center_xy[0]), float(roi_center_xy[1])),
+        radius_m=float(roi_radius_m),
+    )
+    gp = gate_params or GateParams()
+    accepted, decisions = apply_quality_gate(
+        mesh, detected, params=gp, selection=selection,
+    )
+    gate_warnings = summarise_decisions(decisions, selection)
+    # Replace the M10 prefix so the frontend shows "Live ROI" instead of
+    # the static "Selected-building result" wording.
+    if gate_warnings and gate_warnings[0].startswith("Selected-building result"):
+        gate_warnings[0] = gate_warnings[0].replace(
+            "Selected-building result",
+            f"Live ROI result (r={roi_radius_m:.1f}m)",
+            1,
+        )
+
+    assembled = planes_to_contract(
+        mesh, accepted,
+        module=module,
+        max_planes=max_planes,
+        min_usable_area_m2=min_usable_area_m2,
+        detect_bumps=detect_bumps,
+        extra_warnings=gate_warnings,
+        method="interactive_roi",
+        panel_source="auto",
+    )
+
+    return RoiDesignResult(
+        assembled=assembled,
+        n_candidates_in_roi=n_in_roi,
+        n_planes_detected=n_detected,
+        n_planes_accepted=len(accepted),
     )

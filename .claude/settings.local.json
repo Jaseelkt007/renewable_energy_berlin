@@ -23,7 +23,18 @@
       "Bash(curl -sS -i -X OPTIONS http://127.0.0.1:8001/api/projects/297be54c5e7e4aad/seed -H \"Origin: http://localhost:3000\" -H \"Access-Control-Request-Method: POST\" -H \"Access-Control-Request-Headers: content-type\")",
       "Bash(curl *)",
       "Bash(/mnt/d/Berlin_hackathon/viewer_app/backend/.venv/bin/uvicorn *)",
-      "Bash(pkill -9 -f \"uvicorn --app-dir\")"
+      "Bash(pkill -9 -f \"uvicorn --app-dir\")",
+      "Bash(viewer_app/backend/.venv/bin/uvicorn viewer_app.backend.main:app --host 127.0.0.1 --port 8042 --log-level warning)",
+      "Bash(echo \"started pid=$!\" sleep 5 echo \"--- log ---\" cat /tmp/uvicorn.log echo \"--- curl ---\" curl -s -v http://127.0.0.1:8042/api/health)",
+      "Bash(viewer_app/backend/.venv/bin/python *)",
+      "Bash(node -e ' *)",
+      "Bash(npx --no-install next lint app/page.jsx)",
+      "Bash(npm run *)",
+      "Bash(pkill -f 'uvicorn viewer_app')",
+      "Bash(pkill -f uvicorn)",
+      "Bash(grep -oE 'M11 debug[^<]{0,80}|Run hardcoded ROI[^<]{0,40}|Roof Viewer[^<]{0,40}|Loading projects')",
+      "Bash(cd /mnt/d/Berlin_hackathon sleep 3 echo \"--- where am I ---\")",
+      "Bash(pwd echo *)"
     ]
   }
 }

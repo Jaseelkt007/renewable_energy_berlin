@@ -1,20 +1,36 @@
 {
-  "schema_version": "1.0.0",
-  "description": "Canonical mapping from project_id to its photogrammetry GLB. Consumed by scripts/build_all.py and by Person 1's recommendation engine. Each entry's roof JSON is written to out/<project_id>.roof.json.",
+  "schema_version": "1.1.0",
+  "description": "Canonical mapping from project_id to its photogrammetry GLB. Consumed by scripts/build_all.py and by Person 1's recommendation engine. Each entry's roof JSON is written to out/<project_id>.roof.json. v1.1 adds an optional `selection` block (M10) that narrows the auto pipeline to one customer's building inside a multi-building tile.",
   "projects": [
     {
       "project_id": "297be54c5e7e4aad",
       "glb_file": "3D_Modell Hamburg.glb",
       "label": "Hamburg demo",
       "note": "Real customer profile from projects_status_quo.csv. 4500 kWh/year, no existing solar, no EV.",
-      "source": "real_csv"
+      "source": "real_csv",
+      "selection": {
+        "mode": "roi_circle",
+        "center_xy": [0.0, 0.0],
+        "radius_m": 12.0,
+        "rationale": "Targets the cluster of small tilted roofs near the tile origin (roof_8/9/10 in tile-wide output). Hand-tuned for residential-scale single-building output."
+      }
     },
     {
       "project_id": "98b53eaa68c0eeeb",
       "glb_file": "3D_Modell Brandenburg.glb",
       "label": "Brandenburg demo",
       "note": "Real customer profile from projects_status_quo.csv. 6000 kWh/year + EV (12000 km/year). Roof historically sold as 43 modules + 15 kWh battery.",
-      "source": "real_csv"
+      "source": "real_csv",
+      "selection": {
+        "mode": "roi_circle",
+        "center_xy": [43.0, 49.0],
+        "radius_m": 10.0,
+        "rationale": "Centred on roof_5 (~45 panels in tile-wide output), closest to the historical 43-module sale."
+      },
+      "gate_overrides": {
+        "min_height_above_ground_m": 0.0,
+        "rationale": "Brandenburg target sits on elevated terrain with no nearby lower vertices (the photogrammetry mesh has no ground samples within ~170m of the roof). Local-ground rejection is unreliable here; ROI selection alone is trusted."
+      }
     },
     {
       "project_id": "demo_north",

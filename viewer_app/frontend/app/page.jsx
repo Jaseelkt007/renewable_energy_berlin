@@ -55,7 +55,20 @@ export default function Page() {
   const [error, setError] = useState(null);
   const [loadingRoof, setLoadingRoof] = useState(false);
   const [overlays, setOverlays] = useState(DEFAULT_OVERLAYS);
+  const [mode, setMode] = useState("selected"); // M10 — "selected" | "tile"
   const [seeding, setSeeding] = useState({ busy: false, point: null, lastError: null, lastResult: null });
+  // M11 — interactive ROI state.
+  // `interactionMode` controls what a click on the model does:
+  //   "seed" — M8 click-to-refit a single plane (legacy default).
+  //   "roi"  — M11 set the ROI center; user then adjusts radius and runs /design.
+  // `roi` is the picked region, in GLB local space: { center: [x,y,z], radius }.
+  // `liveDesign` is the full RoofDesign payload from /design that, when present,
+  // replaces `roof` for rendering. The pending/error states mirror the M8 model.
+  const [interactionMode, setInteractionMode] = useState("seed");
+  const [roi, setRoi] = useState(null);
+  const [liveDesign, setLiveDesign] = useState(null);
+  const [designPending, setDesignPending] = useState(false);
+  const [designError, setDesignError] = useState(null);
 
   // Fetch project list once on mount.
   useEffect(() => {
@@ -75,13 +88,18 @@ export default function Page() {
       });
   }, []);
 
-  // Re-fetch roof JSON when the selection changes.
+  // Re-fetch roof JSON when the selection or mode changes.
   useEffect(() => {
     if (!selected) return;
     setRoof(null);
     setSeeding({ busy: false, point: null, lastError: null, lastResult: null });
+    // M11 — drop any previous live ROI result + marker; saved-canonical takes over.
+    setRoi(null);
+    setLiveDesign(null);
+    setDesignPending(false);
+    setDesignError(null);
     setLoadingRoof(true);
-    const url = `${API_BASE}/api/projects/${selected.project_id}/roof`;
+    const url = `${API_BASE}/api/projects/${selected.project_id}/roof?mode=${mode}`;
     fetch(url)
       .then(async (r) => {
         if (!r.ok) throw new Error(await parseHttpError(r));
@@ -93,15 +111,24 @@ export default function Page() {
         else setError(`Failed to load roof JSON: ${e.message}`);
       })
       .finally(() => setLoadingRoof(false));
-  }, [selected]);
+  }, [selected, mode]);
 
   const modelUrl = selected ? `${API_BASE}/api/projects/${selected.project_id}/model` : null;
 
-  // M8 — click-to-seed handler. POSTs the click to the backend, merges the
-  // returned plane/panels/obstructions into the current roof state, and updates
-  // the summary so the kWp counter reflects the addition.
+  // M8 / M11 — single click handler driven by interactionMode.
+  //   "seed" → POST /seed and merge the new plane (M8 legacy).
+  //   "roi"  → set ROI center for the M11 design endpoint; no network call yet.
+  // The default radius (15 m) is reused if the user hasn't picked an ROI before
+  // for this project; subsequent clicks keep the slider's current radius so the
+  // user can re-pick a center without losing their tuning.
   async function handleSeedClick({ point, normal, faceIndex }) {
     if (!selected) return;
+    if (interactionMode === "roi") {
+      const prevRadius = roi?.radius ?? 15;
+      setRoi({ center: point, radius: prevRadius });
+      setDesignError(null);
+      return;
+    }
     const planeId = `seeded_${Date.now().toString(36)}`;
     const url = `${API_BASE}/api/projects/${selected.project_id}/seed`;
     const body = {
@@ -148,6 +175,69 @@ export default function Page() {
     }
   }
 
+  // M11 — adjust ROI radius from the slider (live local update, no POST).
+  function handleRoiRadiusChange(r) {
+    setRoi((prev) => prev ? { ...prev, radius: r } : prev);
+    setDesignError(null);
+  }
+
+  // M11 — clear the ROI marker AND any live result, reverting to the saved
+  // canonical roof JSON for the current project/mode.
+  function handleClearRoi() {
+    setRoi(null);
+    setLiveDesign(null);
+    setDesignError(null);
+  }
+
+  // M11 — POST /design with the picked ROI. The response is a full RoofDesign
+  // shape that takes over `effectiveRoof` for the scene + summary panel.
+  async function handleRunRoi() {
+    if (!selected || !roi) return;
+    const body = {
+      center_xy: [roi.center[0], roi.center[1]],
+      radius_m: roi.radius,
+    };
+    const url = `${API_BASE}/api/projects/${selected.project_id}/design`;
+    setDesignPending(true);
+    setDesignError(null);
+    console.info("[roof-viewer] POST /design", url, body);
+    let response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch (e) {
+      setDesignError(describeNetworkError(e, url));
+      setDesignPending(false);
+      return;
+    }
+    if (!response.ok) {
+      setDesignError(await parseHttpError(response));
+      setDesignPending(false);
+      return;
+    }
+    try {
+      const data = await response.json();
+      console.info("[roof-viewer] /design response:", {
+        panels: data.summary?.panel_count,
+        kwp: data.summary?.system_kwp,
+        diagnostics: data.diagnostics,
+      });
+      setLiveDesign(data);
+    } catch (e) {
+      setDesignError(`Bad JSON from /design: ${e.message}`);
+    } finally {
+      setDesignPending(false);
+    }
+  }
+
+  // M11 — what the scene + panels actually render. Live ROI result wins when
+  // present; otherwise fall back to the GET roof JSON (M10 selected/tile).
+  const effectiveRoof = liveDesign || roof;
+  const isLive = Boolean(liveDesign);
+
   return (
     <div style={{
       display: "grid",
@@ -159,7 +249,8 @@ export default function Page() {
       <aside style={{ padding: 14, borderRight: "1px solid #e5e7eb", background: "#fff", overflow: "auto" }}>
         <h2>Roof Viewer</h2>
         <p style={{ fontSize: 11, color: "#6b7280", marginTop: -4 }}>
-          M0–M8: hover for plane info, click to refit a plane locally.
+          M0–M11. Pick the customer&apos;s house in the 3D view (Interaction → Pick ROI) to run the
+          pipeline live on that region.
         </p>
 
         <ProjectSelector projects={projects} selected={selected} onSelect={setSelected} />
@@ -175,47 +266,72 @@ export default function Page() {
 
         {loadingRoof && <div style={{ marginTop: 8, fontSize: 12 }}>Loading roof JSON…</div>}
 
-        <SummaryPanel roof={roof} />
+        <SummaryPanel roof={effectiveRoof} />
+
+        {/* M11 — small status row so the user always knows whether they're
+            looking at a saved JSON or a live ROI computation. */}
+        {selected && effectiveRoof && (
+          <div className="kv-row" style={{ marginTop: 8, fontSize: 12 }}>
+            <span>Source</span>
+            <strong style={{ color: isLive ? "#0e7490" : "#475569" }}>
+              {isLive ? "live /design" : "saved canonical"}
+            </strong>
+          </div>
+        )}
 
         {error && <div className="error-banner">{error}</div>}
 
-        <div className="warn-banner" style={{ marginTop: 14 }}>
-          Current auto result is tile-wide. M9 will bind/select one customer building or roof
-          subset for realistic per-home output.
-        </div>
       </aside>
 
       {/* Center: 3D viewer */}
       <main style={{ position: "relative", background: "#0e0f14" }}>
         {!selected && <CenterMessage>Select a project to start.</CenterMessage>}
-        {selected && !roof && !error && <CenterMessage>Loading…</CenterMessage>}
-        {selected && roof && (
+        {selected && !effectiveRoof && !error && <CenterMessage>Loading…</CenterMessage>}
+        {selected && effectiveRoof && (
           <RoofScene
             modelUrl={modelUrl}
-            roof={roof}
+            roof={effectiveRoof}
             overlays={overlays}
             onSeedClick={handleSeedClick}
             seedingState={seeding}
+            roi={interactionMode === "roi" ? roi : null}
           />
         )}
         <SeedStatus seeding={seeding} />
-        {selected && roof && (
+        {selected && effectiveRoof && (
           <div style={{
             position: "absolute", bottom: 10, left: 10,
             background: "rgba(15,17,24,0.7)", color: "#cbd5e1",
             padding: "6px 10px", fontSize: 11, borderRadius: 4,
             fontFamily: "ui-monospace, monospace",
           }}>
-            hover the model for plane info · click to seed a refit
+            {interactionMode === "roi"
+              ? "click on the customer's roof to set the ROI center"
+              : "hover the model for plane info · click to seed a refit"}
           </div>
         )}
       </main>
 
       {/* Right: overlays + legend + per-plane breakdown */}
       <aside style={{ padding: 14, borderLeft: "1px solid #e5e7eb", background: "#fff", overflow: "auto" }}>
-        <OverlayControls overlays={overlays} setOverlays={setOverlays} />
+        <OverlayControls
+          overlays={overlays}
+          setOverlays={setOverlays}
+          mode={mode}
+          setMode={setMode}
+          availableModes={selected?.modes || ["selected"]}
+          interactionMode={interactionMode}
+          setInteractionMode={setInteractionMode}
+          roi={roi}
+          setRoiRadius={handleRoiRadiusChange}
+          onRunRoi={handleRunRoi}
+          onClearRoi={handleClearRoi}
+          designPending={designPending}
+          isLive={isLive}
+          designError={designError}
+        />
         <Legend />
-        <PanelsByPlane roof={roof} />
+        <PanelsByPlane roof={effectiveRoof} />
         <div className="note">
           <strong>Coordinate frame.</strong> JSON coords are in the original GLB local space (Z-up,
           meters). The R3F Canvas is configured with <code>camera.up = (0,0,1)</code> so geometry

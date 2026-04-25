@@ -10,6 +10,7 @@ import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader";
 import PolygonOverlay from "./PolygonOverlay";
 import ObstructionOverlay from "./ObstructionOverlay";
 import PanelOverlay from "./PanelOverlay";
+import RoiOverlay from "./RoiOverlay";
 import { findPlaneAtPoint } from "./planeLookup";
 
 const dracoLoader = new DRACOLoader();
@@ -39,7 +40,7 @@ function bboxView(bbox) {
   return { center, size };
 }
 
-export default function RoofScene({ modelUrl, roof, overlays, onSeedClick, seedingState }) {
+export default function RoofScene({ modelUrl, roof, overlays, onSeedClick, seedingState, roi }) {
   const { center, size } = useMemo(() => bboxView(roof?.bbox), [roof]);
   const camPos = useMemo(
     () => [center[0] + size, center[1] - size, center[2] + size * 0.7],
@@ -111,6 +112,9 @@ export default function RoofScene({ modelUrl, roof, overlays, onSeedClick, seedi
             <meshBasicMaterial color="#22d3ee" />
           </mesh>
         )}
+
+        {/* M11 — picked ROI marker (cyan ring + disc). */}
+        <RoiOverlay roi={roi} />
       </group>
 
       <OrbitControls makeDefault target={center} maxPolarAngle={Math.PI * 0.95} enableDamping />
