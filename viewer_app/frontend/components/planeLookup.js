@@ -18,12 +18,12 @@ function sub3(a, b) {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 }
 
-function projectToPlaneUV(point3d, plane) {
+export function projectToPlaneUV(point3d, plane) {
   const d = sub3(point3d, plane.centroid);
   return [dot3(d, plane.u_axis), dot3(d, plane.v_axis)];
 }
 
-function pointInPolygon2D(uv, polyUV) {
+export function pointInPolygon2D(uv, polyUV) {
   // Crossing-number test.
   let inside = false;
   for (let i = 0, j = polyUV.length - 1; i < polyUV.length; j = i++) {

@@ -10,6 +10,7 @@ import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader";
 import PolygonOverlay from "./PolygonOverlay";
 import ObstructionOverlay from "./ObstructionOverlay";
 import PanelOverlay from "./PanelOverlay";
+import ManualPanelOverlay from "./ManualPanelOverlay";
 import RoiOverlay from "./RoiOverlay";
 import { findPlaneAtPoint } from "./planeLookup";
 
@@ -40,7 +41,28 @@ function bboxView(bbox) {
   return { center, size };
 }
 
-export default function RoofScene({ modelUrl, roof, overlays, onSeedClick, seedingState, roi }) {
+export default function RoofScene({
+  modelUrl,
+  roof,
+  overlays,
+  onSeedClick,
+  seedingState,
+  roi,
+  // M12 — manual editing
+  editMode = "off",
+  effectivePanels,
+  manualAddedPanels = [],
+  removedIds = [],
+  onAddPanelClick,
+  onRemovePanelClick,
+  // M12.1 — hover preview
+  onAddHover,
+  onAddHoverClear,
+  previewCandidate,        // { candidate, valid, reason } | null
+  // M12.1 move mode
+  selectedPanelId = null,
+  onSelectPanel,
+}) {
   const { center, size } = useMemo(() => bboxView(roof?.bbox), [roof]);
   const camPos = useMemo(
     () => [center[0] + size, center[1] - size, center[2] + size * 0.7],
@@ -56,7 +78,13 @@ export default function RoofScene({ modelUrl, roof, overlays, onSeedClick, seedi
     arr.map((p) => p[key]).filter((pts) => Array.isArray(pts) && pts.length >= 3);
 
   const obstructions = roof?.obstructions || [];
-  const panels = roof?.panels || [];
+  const basePanels = roof?.panels || [];
+  // M12 — split panels for rendering. `autoPanels` go through the batched
+  // PanelOverlay (one draw call); `manualAddedPanels` get the green
+  // ManualPanelOverlay; `removedIds` are filtered out of both.
+  const removedSet = new Set(removedIds);
+  const autoPanels = basePanels.filter((p) => !removedSet.has(p.id));
+  const panels = effectivePanels || basePanels;
 
   return (
     <Canvas
@@ -80,7 +108,10 @@ export default function RoofScene({ modelUrl, roof, overlays, onSeedClick, seedi
               url={modelUrl}
               show={overlays.showModel}
               roofPlanes={planes}
-              onSeed={onSeedClick}
+              onSeed={editMode === "add" ? onAddPanelClick : onSeedClick}
+              onAddHover={editMode === "add" ? onAddHover : null}
+              onAddHoverClear={editMode === "add" ? onAddHoverClear : null}
+              editMode={editMode}
             />
           )}
         </Suspense>
@@ -104,7 +135,43 @@ export default function RoofScene({ modelUrl, roof, overlays, onSeedClick, seedi
         {overlays.showObstructions && (
           <ObstructionOverlay obstructions={obstructions} />
         )}
-        {overlays.showPanels && <PanelOverlay panels={panels} />}
+        {overlays.showPanels && (
+          <>
+            <PanelOverlay panels={autoPanels} />
+            <ManualPanelOverlay
+              panels={manualAddedPanels}
+              source="manual"
+              clickable={editMode === "remove"}
+              onPanelClick={onRemovePanelClick}
+            />
+            {editMode === "remove" && (
+              <PanelClickTargets
+                panels={autoPanels}
+                onPanelClick={onRemovePanelClick}
+              />
+            )}
+            {editMode === "move" && (
+              <>
+                <PanelClickTargets
+                  panels={panels}
+                  onPanelClick={onSelectPanel}
+                />
+                {selectedPanelId && (() => {
+                  const sel = panels.find((p) => p.id === selectedPanelId);
+                  return sel ? (
+                    <ManualPanelOverlay panels={[sel]} source="selected" />
+                  ) : null;
+                })()}
+              </>
+            )}
+            {editMode === "add" && previewCandidate?.candidate && (
+              <ManualPanelOverlay
+                panels={[previewCandidate.candidate]}
+                source={previewCandidate.valid ? "candidate-valid" : "candidate-invalid"}
+              />
+            )}
+          </>
+        )}
 
         {seedingState?.busy && seedingState.point && (
           <mesh position={seedingState.point}>
@@ -128,7 +195,7 @@ export default function RoofScene({ modelUrl, roof, overlays, onSeedClick, seedi
  * descendant mesh up to this group, so we get face-accurate raycasts on every
  * triangle of the photogrammetry mesh.
  */
-function InteractiveModel({ url, show, roofPlanes, onSeed }) {
+function InteractiveModel({ url, show, roofPlanes, onSeed, onAddHover, onAddHoverClear, editMode }) {
   const [hover, setHover] = useState(null);
 
   const handleMove = (e) => {
@@ -136,10 +203,16 @@ function InteractiveModel({ url, show, roofPlanes, onSeed }) {
     const point = [e.point.x, e.point.y, e.point.z];
     const plane = findPlaneAtPoint(point, roofPlanes);
     setHover({ point, plane, faceIndex: e.faceIndex ?? null });
+    // M12.1 — in add-mode, fire the hover up so page.jsx can compute the
+    // snapped preview candidate. We forward even when `plane` is null so the
+    // preview clears as soon as the cursor leaves a known plane.
+    if (onAddHover) onAddHover({ point, plane });
   };
 
   const handleClick = (e) => {
     e.stopPropagation();
+    // In remove/move modes, GLB clicks do nothing — only panel clicks matter.
+    if (editMode === "remove" || editMode === "move") return;
     const point = [e.point.x, e.point.y, e.point.z];
     const normal = e.face?.normal
       ? [e.face.normal.x, e.face.normal.y, e.face.normal.z]
@@ -150,12 +223,15 @@ function InteractiveModel({ url, show, roofPlanes, onSeed }) {
   return (
     <group
       onPointerMove={handleMove}
-      onPointerOut={() => setHover(null)}
+      onPointerOut={() => {
+        setHover(null);
+        onAddHoverClear?.();
+      }}
       onClick={handleClick}
       visible={show}
     >
       <GltfModel url={url} />
-      {hover && (
+      {hover && editMode !== "add" && editMode !== "move" && (
         <Html
           position={hover.point}
           style={{ pointerEvents: "none", transform: "translate(8px, -100%)" }}
@@ -164,6 +240,53 @@ function InteractiveModel({ url, show, roofPlanes, onSeed }) {
           <HoverTooltip hover={hover} />
         </Html>
       )}
+    </group>
+  );
+}
+
+/**
+ * M12 — invisible per-panel click targets used only when editMode === "remove".
+ * Each panel becomes its own mesh with userData.panelId so a click goes
+ * straight to the right ID without raycasting against the batched
+ * PanelOverlay geometry.
+ */
+function PanelClickTargets({ panels, onPanelClick }) {
+  return (
+    <group>
+      {panels
+        .filter((p) => Array.isArray(p?.corners_3d) && p.corners_3d.length === 4)
+        .map((p) => {
+          const c = p.corners_3d;
+          const positions = new Float32Array([
+            c[0][0], c[0][1], c[0][2],
+            c[1][0], c[1][1], c[1][2],
+            c[2][0], c[2][1], c[2][2],
+            c[0][0], c[0][1], c[0][2],
+            c[2][0], c[2][1], c[2][2],
+            c[3][0], c[3][1], c[3][2],
+          ]);
+          const geom = new THREE.BufferGeometry();
+          geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+          return (
+            <mesh
+              key={`click-${p.id}`}
+              geometry={geom}
+              userData={{ panelId: p.id }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onPanelClick?.(p.id);
+              }}
+            >
+              <meshBasicMaterial
+                color="#ef4444"
+                transparent
+                opacity={0.001}
+                side={THREE.DoubleSide}
+                depthWrite={false}
+              />
+            </mesh>
+          );
+        })}
     </group>
   );
 }

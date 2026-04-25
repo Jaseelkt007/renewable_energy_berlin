@@ -1,11 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 
 import ProjectSelector from "../components/ProjectSelector";
 import SummaryPanel from "../components/SummaryPanel";
 import OverlayControls from "../components/OverlayControls";
+import { findPlaneAtPoint } from "../components/planeLookup";
+import {
+  computeSnapCandidate,
+  shiftPanelOnPlane,
+  stepSizesForPlane,
+  validatePanelOnPlane,
+} from "../components/panelSnap";
 
 // R3F + three.js need the browser. Render the scene only on the client.
 const RoofScene = dynamic(() => import("../components/RoofScene"), { ssr: false });
@@ -69,6 +76,18 @@ export default function Page() {
   const [liveDesign, setLiveDesign] = useState(null);
   const [designPending, setDesignPending] = useState(false);
   const [designError, setDesignError] = useState(null);
+  // M12 — manual panel editing. `editMode` is "off" | "add" | "remove".
+  // `manualEdits.added` are full Panel objects we layer on top of the AI
+  // proposal; `manualEdits.removedIds` is the set of base panel IDs the user
+  // removed. Both reset on project change and on `liveDesign` change.
+  const [editMode, setEditMode] = useState("off");
+  const [manualEdits, setManualEdits] = useState({ added: [], removedIds: [] });
+  const [editStatus, setEditStatus] = useState(null); // { kind, message } | null
+  // M12.1 — hover preview. `previewCandidate` is { candidate, valid, reason }
+  // recomputed every hover frame in add-mode. Click commits if valid.
+  const [previewCandidate, setPreviewCandidate] = useState(null);
+  // M12.1 — move mode: id of the currently-selected panel (auto or manual).
+  const [selectedPanelId, setSelectedPanelId] = useState(null);
 
   // Fetch project list once on mount.
   useEffect(() => {
@@ -99,6 +118,8 @@ export default function Page() {
     setDesignPending(false);
     setDesignError(null);
     setLoadingRoof(true);
+    setManualEdits({ added: [], removedIds: [] });
+    setEditStatus(null);
     const url = `${API_BASE}/api/projects/${selected.project_id}/roof?mode=${mode}`;
     fetch(url)
       .then(async (r) => {
@@ -112,6 +133,23 @@ export default function Page() {
       })
       .finally(() => setLoadingRoof(false));
   }, [selected, mode]);
+
+  // M12 — running an ROI counts as a new design; clear manual edits.
+  useEffect(() => {
+    setManualEdits({ added: [], removedIds: [] });
+    setEditStatus(null);
+  }, [liveDesign]);
+
+  // M12.1 — drop the preview as soon as add-mode is left.
+  useEffect(() => {
+    if (editMode !== "add") setPreviewCandidate(null);
+    if (editMode !== "move") setSelectedPanelId(null);
+  }, [editMode]);
+
+  // M12.1 — selection follows project/design swaps.
+  useEffect(() => {
+    setSelectedPanelId(null);
+  }, [selected, liveDesign]);
 
   const modelUrl = selected ? `${API_BASE}/api/projects/${selected.project_id}/model` : null;
 
@@ -226,6 +264,11 @@ export default function Page() {
         diagnostics: data.diagnostics,
       });
       setLiveDesign(data);
+      // M12.1 — once the design committed, the ROI picker has done its job.
+      // Drop the marker so the user can edit panels without the cyan ring
+      // covering the roof. Re-running ROI is still possible from the
+      // "Pick ROI" interaction mode (the user just clicks again).
+      setRoi(null);
     } catch (e) {
       setDesignError(`Bad JSON from /design: ${e.message}`);
     } finally {
@@ -237,6 +280,266 @@ export default function Page() {
   // present; otherwise fall back to the GET roof JSON (M10 selected/tile).
   const effectiveRoof = liveDesign || roof;
   const isLive = Boolean(liveDesign);
+
+  // M12 — effective panels = base panels minus removed + manual additions.
+  // The contract isn't touched: source lives in React state only and is used
+  // for color coding via `panelSourceMap`.
+  const removedSet = useMemo(
+    () => new Set(manualEdits.removedIds),
+    [manualEdits.removedIds],
+  );
+  const basePanels = effectiveRoof?.panels || [];
+  const effectivePanels = useMemo(
+    () => [
+      ...basePanels.filter((p) => !removedSet.has(p.id)),
+      ...manualEdits.added,
+    ],
+    [basePanels, removedSet, manualEdits.added],
+  );
+  const hasEdits =
+    manualEdits.added.length > 0 || manualEdits.removedIds.length > 0;
+
+  // Recompute summary from effectivePanels when edits exist; otherwise pass
+  // through the canonical summary so M0–M11 numbers are byte-identical.
+  const effectiveRoofForView = useMemo(() => {
+    if (!effectiveRoof) return null;
+    if (!hasEdits) return effectiveRoof;
+    const moduleWp = effectiveRoof.summary?.module_wp || 440;
+    const panelsByPlane = {};
+    for (const p of effectivePanels) {
+      panelsByPlane[p.plane_id] = (panelsByPlane[p.plane_id] || 0) + 1;
+    }
+    return {
+      ...effectiveRoof,
+      panels: effectivePanels,
+      summary: {
+        ...effectiveRoof.summary,
+        panel_count: effectivePanels.length,
+        system_kwp: Math.round(effectivePanels.length * moduleWp) / 1000,
+        panels_by_plane: panelsByPlane,
+        method: effectiveRoof.summary?.method
+          ? `${effectiveRoof.summary.method} + manual_edit`
+          : "manual_edit",
+      },
+    };
+  }, [effectiveRoof, hasEdits, effectivePanels]);
+
+  const manualAddedPanels = manualEdits.added;
+
+  function handleClearEdits() {
+    setManualEdits({ added: [], removedIds: [] });
+    setEditStatus(null);
+  }
+
+  function handleRemovePanel(panelId) {
+    setEditStatus(null);
+    setManualEdits((prev) => {
+      // If the panel is one we just added, drop it from `added` instead of
+      // adding to `removedIds` — keeps the diff clean.
+      if (prev.added.some((p) => p.id === panelId)) {
+        return { ...prev, added: prev.added.filter((p) => p.id !== panelId) };
+      }
+      if (prev.removedIds.includes(panelId)) return prev;
+      return { ...prev, removedIds: [...prev.removedIds, panelId] };
+    });
+  }
+
+  // M12.1 — move mode handlers ------------------------------------------------
+
+  function handleSelectPanel(panelId) {
+    setEditStatus(null);
+    setSelectedPanelId((prev) => (prev === panelId ? null : panelId));
+  }
+
+  // Apply a (du, dv) nudge in plane (u, v) to the currently-selected panel.
+  // Auto panels become manual on first nudge: we add the moved copy to
+  // `manualEdits.added` and put the original id into `removedIds`. Manual
+  // panels are updated in place (the id is preserved by `shiftPanelOnPlane`).
+  function nudgeSelectedPanel(direction) {
+    if (!effectiveRoof || !selectedPanelId) return;
+    const panel = effectivePanels.find((p) => p.id === selectedPanelId);
+    if (!panel) return;
+    const plane = (effectiveRoof.roof_planes || []).find(
+      (rp) => rp.id === panel.plane_id,
+    );
+    if (!plane) {
+      setEditStatus({ kind: "error", message: "Plane for this panel not found." });
+      return;
+    }
+    const { stepU, stepV } = stepSizesForPlane(panel);
+    const dirToOffset = {
+      "u-": [-stepU, 0],
+      "u+": [stepU, 0],
+      "v-": [0, -stepV],
+      "v+": [0, stepV],
+    };
+    const [du, dv] = dirToOffset[direction] || [0, 0];
+    if (du === 0 && dv === 0) return;
+
+    const moved = shiftPanelOnPlane({ panel, plane, du, dv });
+    const others = effectivePanels.filter(
+      (p) => p.plane_id === plane.id && p.id !== panel.id,
+    );
+    const v = validatePanelOnPlane({ panel: moved, plane, otherPanels: others });
+    if (!v.valid) {
+      setEditStatus({ kind: "error", message: `Cannot move: ${v.reason}` });
+      return;
+    }
+    const isManual = manualEdits.added.some((p) => p.id === panel.id);
+    setManualEdits((prev) => {
+      if (isManual) {
+        return {
+          ...prev,
+          added: prev.added.map((p) => (p.id === panel.id ? moved : p)),
+        };
+      }
+      // Auto → manual override: hide the original, add the moved copy with
+      // a fresh manual id so future state is consistent.
+      const newId = `manual_${plane.id}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e4).toString(36)}`;
+      const promoted = { ...moved, id: newId, _source: "manual" };
+      // Selection follows the new id so subsequent nudges keep working.
+      setSelectedPanelId(newId);
+      return {
+        added: [...prev.added, promoted],
+        removedIds: prev.removedIds.includes(panel.id)
+          ? prev.removedIds
+          : [...prev.removedIds, panel.id],
+      };
+    });
+    setEditStatus(null);
+  }
+
+  // Arrow-key listener: only active in move mode with a selection.
+  useEffect(() => {
+    if (editMode !== "move") return;
+    function onKey(e) {
+      if (!selectedPanelId) return;
+      const tag = (e.target?.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea") return;
+      switch (e.key) {
+        case "ArrowLeft":
+          nudgeSelectedPanel("u-"); e.preventDefault(); break;
+        case "ArrowRight":
+          nudgeSelectedPanel("u+"); e.preventDefault(); break;
+        case "ArrowUp":
+          nudgeSelectedPanel("v+"); e.preventDefault(); break;
+        case "ArrowDown":
+          nudgeSelectedPanel("v-"); e.preventDefault(); break;
+        case "Escape":
+          setSelectedPanelId(null); e.preventDefault(); break;
+        case "Delete":
+        case "Backspace":
+          handleRemovePanel(selectedPanelId);
+          setSelectedPanelId(null);
+          e.preventDefault();
+          break;
+        default:
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // nudgeSelectedPanel/handleRemovePanel close over current state via the
+    // surrounding render; re-bind on every relevant change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editMode, selectedPanelId, effectivePanels, effectiveRoof, manualEdits]);
+
+  // M12.1 — recompute the snapped preview every hover frame. The plane lookup
+  // and snap math is pure; we keep the work in JS and avoid round-tripping
+  // to the backend on hover. The backend safety check only runs on commit.
+  function handleAddHover({ point, plane }) {
+    if (!effectiveRoof) return;
+    // The InteractiveModel does its own findPlaneAtPoint; trust it but
+    // re-verify here in case of stale roof references during a state swap.
+    const p = plane || findPlaneAtPoint(point, effectiveRoof.roof_planes || []);
+    if (!p) {
+      setPreviewCandidate(null);
+      return;
+    }
+    const samePlanePanels = (effectivePanels || []).filter(
+      (panel) => panel.plane_id === p.id,
+    );
+    const result = computeSnapCandidate({
+      hitPoint: point,
+      plane: p,
+      samePlanePanels,
+    });
+    setPreviewCandidate(result);
+  }
+
+  function handleAddHoverClear() {
+    setPreviewCandidate(null);
+  }
+
+  // M12.1 — click commits the *currently previewed* candidate. The hover
+  // handler already validated locally; the backend call is a safety net so
+  // any drift (or a not-yet-implemented edge case) still surfaces.
+  async function handleAddPanelClick() {
+    if (!selected || !effectiveRoof) return;
+    const preview = previewCandidate;
+    if (!preview?.candidate) {
+      setEditStatus({
+        kind: "error",
+        message:
+          "Click on a detected roof plane (orange/yellow polygon). Hover to preview, then click to commit.",
+      });
+      return;
+    }
+    if (!preview.valid) {
+      setEditStatus({ kind: "error", message: `Cannot place: ${preview.reason}` });
+      return;
+    }
+    const candidate = preview.candidate;
+    const samePlanePanels = (effectivePanels || []).filter(
+      (panel) => panel.plane_id === candidate.plane_id,
+    );
+    const plane = (effectiveRoof.roof_planes || []).find(
+      (rp) => rp.id === candidate.plane_id,
+    );
+    if (!plane) {
+      setEditStatus({ kind: "error", message: "Plane vanished from current design." });
+      return;
+    }
+    const url = `${API_BASE}/api/projects/${selected.project_id}/validate-panel-geometry`;
+    const body = {
+      plane_id: plane.id,
+      plane_centroid: plane.centroid,
+      plane_u_axis: plane.u_axis,
+      plane_v_axis: plane.v_axis,
+      // For manual edits we validate against the raw plane polygon so the
+      // ~30 cm placement setback (which the AI greedy uses) doesn't reject
+      // user-driven panels visibly inside the roof. Backend matches.
+      usable_polygon_3d: plane.polygon_3d || plane.usable_polygon_3d || [],
+      candidate_corners_3d: candidate.corners_3d,
+      existing_panels_corners_3d: samePlanePanels
+        .map((p) => p.corners_3d)
+        .filter(Boolean),
+    };
+    let response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch (e) {
+      setEditStatus({ kind: "error", message: describeNetworkError(e, url) });
+      return;
+    }
+    if (!response.ok) {
+      setEditStatus({ kind: "error", message: await parseHttpError(response) });
+      return;
+    }
+    const data = await response.json();
+    if (!data.ok) {
+      // Server disagreed with the local check. Surface the reason and
+      // do NOT commit — local logic should be tightened to match.
+      setEditStatus({ kind: "error", message: `Server rejected: ${data.reason}` });
+      return;
+    }
+    setManualEdits((prev) => ({ ...prev, added: [...prev.added, candidate] }));
+    setPreviewCandidate(null);
+    setEditStatus({ kind: "success", message: `Added panel on ${plane.id}` });
+  }
 
   return (
     <div style={{
@@ -266,7 +569,7 @@ export default function Page() {
 
         {loadingRoof && <div style={{ marginTop: 8, fontSize: 12 }}>Loading roof JSON…</div>}
 
-        <SummaryPanel roof={effectiveRoof} />
+        <SummaryPanel roof={effectiveRoofForView} />
 
         {/* M11 — small status row so the user always knows whether they're
             looking at a saved JSON or a live ROI computation. */}
@@ -293,11 +596,23 @@ export default function Page() {
             roof={effectiveRoof}
             overlays={overlays}
             onSeedClick={handleSeedClick}
+            onAddPanelClick={handleAddPanelClick}
+            onAddHover={handleAddHover}
+            onAddHoverClear={handleAddHoverClear}
+            previewCandidate={previewCandidate}
+            selectedPanelId={selectedPanelId}
+            onSelectPanel={handleSelectPanel}
+            onRemovePanelClick={handleRemovePanel}
             seedingState={seeding}
             roi={interactionMode === "roi" ? roi : null}
+            editMode={editMode}
+            effectivePanels={effectivePanels}
+            manualAddedPanels={manualAddedPanels}
+            removedIds={manualEdits.removedIds}
           />
         )}
         <SeedStatus seeding={seeding} />
+        <EditStatus status={editStatus} />
         {selected && effectiveRoof && (
           <div style={{
             position: "absolute", bottom: 10, left: 10,
@@ -305,7 +620,15 @@ export default function Page() {
             padding: "6px 10px", fontSize: 11, borderRadius: 4,
             fontFamily: "ui-monospace, monospace",
           }}>
-            {interactionMode === "roi"
+            {editMode === "add"
+              ? "hover roof for a snapped preview · click to commit (yellow=valid, red=blocked)"
+              : editMode === "move"
+              ? selectedPanelId
+                ? "use ←↑→↓ to move · Delete to remove · Esc to deselect"
+                : "click a panel to select · then ←↑→↓ to nudge"
+              : editMode === "remove"
+              ? "click an existing panel to remove it"
+              : interactionMode === "roi"
               ? "click on the customer's roof to set the ROI center"
               : "hover the model for plane info · click to seed a refit"}
           </div>
@@ -329,9 +652,17 @@ export default function Page() {
           designPending={designPending}
           isLive={isLive}
           designError={designError}
+          editMode={editMode}
+          setEditMode={setEditMode}
+          hasEdits={hasEdits}
+          onClearEdits={handleClearEdits}
+          editCounts={{
+            added: manualEdits.added.length,
+            removed: manualEdits.removedIds.length,
+          }}
         />
         <Legend />
-        <PanelsByPlane roof={effectiveRoof} />
+        <PanelsByPlane roof={effectiveRoofForView} />
         <div className="note">
           <strong>Coordinate frame.</strong> JSON coords are in the original GLB local space (Z-up,
           meters). The R3F Canvas is configured with <code>camera.up = (0,0,1)</code> so geometry
@@ -402,6 +733,23 @@ function SeedStatus({ seeding }) {
       fontFamily: "ui-monospace, monospace",
       maxWidth: 420,
     }}>{body}</div>
+  );
+}
+
+function EditStatus({ status }) {
+  if (!status) return null;
+  const colors = {
+    info: "#22d3ee",
+    success: "#86efac",
+    error: "#fca5a5",
+  };
+  return (
+    <div style={{
+      position: "absolute", top: 10, right: 10,
+      background: "rgba(15,17,24,0.85)", color: colors[status.kind] || "#cbd5e1",
+      padding: "8px 12px", fontSize: 12, borderRadius: 4,
+      fontFamily: "ui-monospace, monospace", maxWidth: 360,
+    }}>{status.message}</div>
   );
 }
 

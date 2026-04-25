@@ -25,6 +25,12 @@ export default function OverlayControls({
   designPending,
   isLive,
   designError,
+  // M12 — manual panel editing
+  editMode,
+  setEditMode,
+  hasEdits,
+  onClearEdits,
+  editCounts,
 }) {
   const showResultModeToggle =
     Array.isArray(availableModes) && availableModes.length > 1 && setMode;
@@ -128,6 +134,45 @@ export default function OverlayControls({
               {m === "selected" ? "Selected building" : "Tile-wide (debug)"}
             </label>
           ))}
+        </div>
+      )}
+
+      {setEditMode && (
+        <div style={{ marginBottom: 14 }}>
+          <h4>Edit panels (M12)</h4>
+          {[
+            ["off", "off"],
+            ["add", "add panel (hover preview, click)"],
+            ["remove", "remove panel (click panel)"],
+            ["move", "move panel (click to select, ←↑→↓)"],
+          ].map(([value, label]) => (
+            <label className="toggle-row" key={value}>
+              <input
+                type="radio"
+                name="edit-mode"
+                value={value}
+                checked={editMode === value}
+                onChange={() => setEditMode(value)}
+              />
+              {label}
+            </label>
+          ))}
+          {hasEdits && (
+            <div style={{ marginTop: 6, fontSize: 11, color: "#475569" }}>
+              <div>+{editCounts?.added ?? 0} added · −{editCounts?.removed ?? 0} removed</div>
+              <button
+                onClick={onClearEdits}
+                style={{
+                  marginTop: 4, padding: "4px 8px", fontSize: 11,
+                  cursor: "pointer", background: "transparent",
+                  color: "#475569", border: "1px solid #cbd5e1",
+                  borderRadius: 3, width: "100%",
+                }}
+              >
+                Reset to AI proposal
+              </button>
+            </div>
+          )}
         </div>
       )}
 

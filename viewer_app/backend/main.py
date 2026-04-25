@@ -32,6 +32,7 @@ if str(_REPO_ROOT_FOR_IMPORT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT_FOR_IMPORT))
 
 from roof3d.candidates import select_roof_candidates  # noqa: E402
+from roof3d.edit import validate_panel_placement  # noqa: E402
 from roof3d.contract import (  # noqa: E402
     BBox,
     CoordinateSystem,
@@ -68,6 +69,7 @@ app.add_middleware(
         "http://localhost:3001",
         "http://127.0.0.1:3001",
     ],
+    allow_origin_regex=r"https://.*\.(lovable\.app|lovableproject\.com|lovable\.dev)",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -97,9 +99,11 @@ def _safe_repo_path(rel_path: str) -> Path:
     return candidate
 
 
+@app.get("/")
+@app.get("/health")
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True}
+    return {"status": "ok", "service": "roof-viewer-backend"}
 
 
 def _tile_path_for(proj: dict) -> Path:
@@ -356,3 +360,33 @@ def design(project_id: str, body: DesignRequest):
         "gate_overrides_applied": dict(overrides),
     }
     return payload
+
+
+# ---------------------------------------------------------------------------
+# M12 — manual panel edit: geometry validation
+# ---------------------------------------------------------------------------
+
+class ValidatePanelGeometryRequest(BaseModel):
+    plane_id: str
+    plane_centroid: list[float] = Field(..., min_length=3, max_length=3)
+    plane_u_axis: list[float] = Field(..., min_length=3, max_length=3)
+    plane_v_axis: list[float] = Field(..., min_length=3, max_length=3)
+    usable_polygon_3d: list[list[float]]
+    candidate_corners_3d: list[list[float]] = Field(..., min_length=4, max_length=4)
+    existing_panels_corners_3d: list[list[list[float]]] = Field(default_factory=list)
+
+
+@app.post("/api/projects/{project_id}/validate-panel-geometry")
+def validate_panel_geometry(project_id: str, body: ValidatePanelGeometryRequest):
+    # project_id is accepted for symmetry with other endpoints; the validation
+    # is stateless because the frontend ships the relevant plane data.
+    _get_project(project_id)
+    result = validate_panel_placement(
+        plane_centroid=body.plane_centroid,
+        plane_u_axis=body.plane_u_axis,
+        plane_v_axis=body.plane_v_axis,
+        usable_polygon_3d=body.usable_polygon_3d,
+        candidate_corners_3d=body.candidate_corners_3d,
+        existing_panels_corners_3d=body.existing_panels_corners_3d,
+    )
+    return {"ok": result.ok, "reason": result.reason, "plane_id": body.plane_id}
