@@ -11,9 +11,9 @@
 
 ## Live demo
 
-- **Frontend:** *(insert deployed URL)*
-- **Backend:** *(insert deployed FastAPI URL or ngrok pin)*
-- **Backup video:** *(insert link)* — *insurance against bad venue WiFi*
+- **Frontend:** https://lovable.dev/projects/a6628333-eca9-4ea3-83cf-e26f6e95c663?magic_link=mc_0e2e2808-216c-48c4-a4b5-9b74be133d70
+- **Backend:** https://github.com/Jaseelkt007/renewable_energy_berlin.git
+- **Backup video:** https://youtu.be/Tj6L6ervH2k
 
 ---
 
