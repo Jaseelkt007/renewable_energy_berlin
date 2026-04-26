@@ -28,6 +28,11 @@ const DEFAULT_WATT_PEAK = 440;
 const PANEL_GAP_M = 0.02;     // matches roof3d ModuleSpec.gap_m
 const PANEL_LIFT_M = 0.03;    // matches roof3d ModuleSpec.lift_m
 const OVERLAP_EPS = 1e-3;     // 1 mm slack so touching edges count as "fits"
+// Slack added to a single grid step when deciding "is this candidate
+// adjacent to an AI panel?". 5 cm absorbs floating-point drift from snap +
+// projection without admitting non-neighbors (the next-next cell is at
+// 2 * step, well outside step + 0.05).
+const ADJACENCY_SLACK_M = 0.05;
 // 2 cm safety inset on the *raw* plane polygon. We deliberately don't use
 // the AI's `usable_polygon_3d` for manual edits — that polygon is inset by
 // the placement setback (~30 cm) so the auto greedy doesn't run off the
@@ -107,6 +112,27 @@ function rectInsidePolygon(centerUV, halfU, halfV, polyUV) {
 }
 
 /**
+ * Is `centerUV` within one grid step (+ small slack) of any of the supplied
+ * AI panel centers? If yes, the candidate is "adjacent" to AI work and we
+ * trust the AI's neighbor as proof the area is buildable, even if the raw
+ * plane polygon (alpha-shape on noisy mesh) says otherwise.
+ *
+ * Crucially we only consider AI panels here — not manual additions — so a
+ * user can't extend buildability transitively by chaining panels off the
+ * roof.
+ */
+function isAdjacentToAiPanel(centerUV, panelWidthM, panelHeightM, aiPanelsUV) {
+  const stepU = panelWidthM + PANEL_GAP_M + ADJACENCY_SLACK_M;
+  const stepV = panelHeightM + PANEL_GAP_M + ADJACENCY_SLACK_M;
+  for (const p of aiPanelsUV) {
+    const du = Math.abs(centerUV[0] - p.centerUV[0]);
+    const dv = Math.abs(centerUV[1] - p.centerUV[1]);
+    if (du <= stepU && dv <= stepV) return true;
+  }
+  return false;
+}
+
+/**
  * Pick the nearest existing same-plane panel as the snap anchor.
  * Distance is in (u, v); panels on different planes were already filtered.
  */
@@ -134,7 +160,15 @@ function nearestAnchor(cursorUV, panelsUV) {
  * returns { candidate, valid, reason }; `candidate` is always present
  * (we render even invalid candidates, in red, so the user sees why).
  */
-export function computeSnapCandidate({ hitPoint, plane, samePlanePanels = [] }) {
+export function computeSnapCandidate({
+  hitPoint,
+  plane,
+  samePlanePanels = [],
+  // Subset of `samePlanePanels` that are AI-placed (auto). Used purely to
+  // decide whether to skip the polygon-containment check; the overlap test
+  // still considers every panel.
+  aiPanelsOnPlane = [],
+}) {
   if (!plane?.centroid || !plane?.u_axis || !plane?.v_axis || !plane?.normal) {
     return null;
   }
@@ -189,19 +223,26 @@ export function computeSnapCandidate({ hitPoint, plane, samePlanePanels = [] }) 
   let valid = true;
   let reason = "ok";
 
-  // Containment: prefer the *raw* plane polygon for manual edits — see
-  // CONTAIN_EPS comment above. Fall back to the usable polygon only if the
-  // plane was emitted without a raw polygon (shouldn't happen for AI planes).
-  const polyPts = plane.polygon_3d || plane.usable_polygon_3d || [];
-  if (polyPts.length >= 3) {
-    const polyUV = polyPts.map((pt) => projectToPlaneUV(pt, plane));
-    // Inflate the polygon test by CONTAIN_EPS via a uniform shrink of the
-    // candidate rect — cheaper than buffering a polygon by 1 cm.
-    const halfU = widthM / 2 - CONTAIN_EPS;
-    const halfV = heightM / 2 - CONTAIN_EPS;
-    if (!rectInsidePolygon(snappedUV, halfU, halfV, polyUV)) {
-      valid = false;
-      reason = "outside usable area";
+  // Adjacency bypass: if the snapped center sits within one grid step of an
+  // AI panel center, the AI itself vouches that this area is on the roof.
+  // We skip the polygon test in that case — the alpha-shape boundary is
+  // often conservative and rejects valid placements next to the AI's
+  // outermost row, which is the most natural place for a user to add.
+  const aiPanelsUV = (aiPanelsOnPlane || [])
+    .filter((p) => Array.isArray(p?.center) && p.center.length === 3)
+    .map((p) => ({ centerUV: projectToPlaneUV(p.center, plane) }));
+  const adjacentToAi = isAdjacentToAiPanel(snappedUV, widthM, heightM, aiPanelsUV);
+
+  if (!adjacentToAi) {
+    const polyPts = plane.polygon_3d || plane.usable_polygon_3d || [];
+    if (polyPts.length >= 3) {
+      const polyUV = polyPts.map((pt) => projectToPlaneUV(pt, plane));
+      const halfU = widthM / 2 - CONTAIN_EPS;
+      const halfV = heightM / 2 - CONTAIN_EPS;
+      if (!rectInsidePolygon(snappedUV, halfU, halfV, polyUV)) {
+        valid = false;
+        reason = "outside usable area";
+      }
     }
   }
 
@@ -277,16 +318,26 @@ export function shiftPanelOnPlane({ panel, plane, du, dv }) {
  * polygon and a list of other-panel centers (excluding itself, by id).
  * Mirrors the checks in `computeSnapCandidate` so move and add agree.
  */
-export function validatePanelOnPlane({ panel, plane, otherPanels }) {
-  const polyPts = plane.polygon_3d || plane.usable_polygon_3d || [];
-  if (polyPts.length < 3) return { valid: false, reason: "plane has no polygon" };
-
+export function validatePanelOnPlane({ panel, plane, otherPanels, aiPanelsOnPlane = [] }) {
   const centerUV = projectToPlaneUV(panel.center, plane);
-  const polyUV = polyPts.map((pt) => projectToPlaneUV(pt, plane));
-  const halfU = panel.width_m / 2 - CONTAIN_EPS;
-  const halfV = panel.height_m / 2 - CONTAIN_EPS;
-  if (!rectInsidePolygon(centerUV, halfU, halfV, polyUV)) {
-    return { valid: false, reason: "outside usable area" };
+
+  // Same adjacency bypass as add-mode (see computeSnapCandidate).
+  const aiPanelsUV = (aiPanelsOnPlane || [])
+    .filter((p) => Array.isArray(p?.center) && p.center.length === 3 && p.id !== panel.id)
+    .map((p) => ({ centerUV: projectToPlaneUV(p.center, plane) }));
+  const adjacentToAi = isAdjacentToAiPanel(
+    centerUV, panel.width_m, panel.height_m, aiPanelsUV,
+  );
+
+  if (!adjacentToAi) {
+    const polyPts = plane.polygon_3d || plane.usable_polygon_3d || [];
+    if (polyPts.length < 3) return { valid: false, reason: "plane has no polygon" };
+    const polyUV = polyPts.map((pt) => projectToPlaneUV(pt, plane));
+    const halfU = panel.width_m / 2 - CONTAIN_EPS;
+    const halfV = panel.height_m / 2 - CONTAIN_EPS;
+    if (!rectInsidePolygon(centerUV, halfU, halfV, polyUV)) {
+      return { valid: false, reason: "outside usable area" };
+    }
   }
 
   for (const other of otherPanels || []) {

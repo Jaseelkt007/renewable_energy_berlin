@@ -2,6 +2,7 @@
 fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.6
+python-multipart>=0.0.9
 
 # Geometry / mesh / GLB (used by roof3d pipeline imported in main.py)
 trimesh>=4.4

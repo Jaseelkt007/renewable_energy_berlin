@@ -15,10 +15,15 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import tempfile
 import time
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -31,6 +36,7 @@ _REPO_ROOT_FOR_IMPORT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT_FOR_IMPORT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT_FOR_IMPORT))
 
+from roof3d.assemble import planes_to_contract  # noqa: E402
 from roof3d.candidates import select_roof_candidates  # noqa: E402
 from roof3d.edit import validate_panel_placement  # noqa: E402
 from roof3d.contract import (  # noqa: E402
@@ -40,6 +46,7 @@ from roof3d.contract import (  # noqa: E402
 )
 from roof3d.loader import load_glb  # noqa: E402
 from roof3d.placement import ModuleSpec  # noqa: E402
+from roof3d.planes import cluster_planes  # noqa: E402
 from roof3d.quality import GateParams  # noqa: E402
 from roof3d.seeded import (  # noqa: E402
     RoiTooSmall,
@@ -82,7 +89,84 @@ def _load_project_map() -> list[dict]:
     return json.loads(PROJECT_MAP_PATH.read_text())
 
 
+# ---------------------------------------------------------------------------
+# Upload sessions (Lovable integration)
+#
+# A "session" is a transient project created from a user-uploaded GLB. It
+# lives only in process memory; Render restarts wipe it. The session_id is
+# accepted in place of project_id on every existing route — _get_project
+# checks _SESSIONS first and falls back to the on-disk project_map.json.
+# ---------------------------------------------------------------------------
+
+SESSION_TTL_MIN = 30
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
+@dataclass
+class SessionState:
+    session_id: str
+    glb_path: Path                # tempfile on disk; deleted with the session
+    label: str
+    loaded: Any                   # roof3d.loader.LoadedMesh
+    candidates: Any               # roof3d.candidates.CandidateResult
+    design: dict                  # cached RoofDesign as JSON-shaped dict
+    panel_count: int = 0
+    system_kwp: float = 0.0
+    last_panel_source: str | None = None
+    panel_count_updated_at: datetime | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+_SESSIONS: dict[str, SessionState] = {}
+
+
+def _evict_expired_sessions() -> None:
+    """Lazy TTL sweep — called on every session-touching request."""
+    now = datetime.now(timezone.utc)
+    cutoff = now.timestamp() - SESSION_TTL_MIN * 60
+    stale = [sid for sid, s in _SESSIONS.items() if s.last_seen.timestamp() < cutoff]
+    for sid in stale:
+        s = _SESSIONS.pop(sid, None)
+        if s is None:
+            continue
+        try:
+            if s.glb_path.is_file():
+                s.glb_path.unlink()
+        except OSError:
+            pass
+        log.info("session EVICTED %s (idle > %d min)", sid, SESSION_TTL_MIN)
+
+
+def _touch_session(sid: str) -> SessionState:
+    _evict_expired_sessions()
+    s = _SESSIONS.get(sid)
+    if s is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown or expired session {sid!r} — please re-upload the GLB",
+        )
+    s.last_seen = datetime.now(timezone.utc)
+    return s
+
+
 def _get_project(project_id: str) -> dict:
+    """Return a project-shaped dict for either an upload session or a
+    pre-baked project from project_map.json. Sessions take priority so a
+    UUID can never collide with a hand-picked demo id.
+    """
+    s = _SESSIONS.get(project_id)
+    if s is not None:
+        s.last_seen = datetime.now(timezone.utc)
+        # The model_file path here is absolute (the tempfile); _safe_repo_path
+        # is only used for entries from project_map.json, so callers must
+        # detect sessions explicitly when resolving paths.
+        return {
+            "project_id": s.session_id,
+            "label": s.label,
+            "model_file": str(s.glb_path),
+            "_session": True,
+        }
     for p in _load_project_map():
         if p["project_id"] == project_id:
             return p
@@ -139,6 +223,10 @@ def roof(
     mode: str = Query(default="selected", pattern="^(selected|tile)$"),
 ):
     proj = _get_project(project_id)
+    # Upload session: there is exactly one design (computed at /upload time).
+    # The `mode` parameter is accepted for API symmetry but ignored.
+    if proj.get("_session"):
+        return JSONResponse(_SESSIONS[project_id].design)
     if mode == "tile":
         roof_path = _tile_path_for(proj)
         rel_label = roof_path.name
@@ -154,6 +242,15 @@ def roof(
 @app.get("/api/projects/{project_id}/model")
 def model(project_id: str):
     proj = _get_project(project_id)
+    if proj.get("_session"):
+        glb_path = Path(proj["model_file"])
+        if not glb_path.is_file():
+            raise HTTPException(status_code=404, detail="uploaded model file is gone")
+        return FileResponse(
+            glb_path,
+            media_type="model/gltf-binary",
+            filename=f"upload_{project_id}.glb",
+        )
     model_path = _safe_repo_path(proj["model_file"])
     if not model_path.is_file():
         raise HTTPException(status_code=404,
@@ -178,6 +275,11 @@ _CAND_CACHE: dict[str, object] = {}
 
 def _get_cached_mesh(proj: dict):
     pid = proj["project_id"]
+    # Upload session: mesh already loaded at /upload time, attached to the
+    # session state. Skip the on-disk lookup entirely.
+    if proj.get("_session"):
+        s = _SESSIONS[pid]
+        return s.loaded
     cached = _MESH_CACHE.get(pid)
     if cached is not None:
         return cached
@@ -191,6 +293,9 @@ def _get_cached_mesh(proj: dict):
 
 def _get_cached_candidates(proj: dict):
     pid = proj["project_id"]
+    if proj.get("_session"):
+        s = _SESSIONS[pid]
+        return s.candidates
     cached = _CAND_CACHE.get(pid)
     if cached is not None:
         return cached
@@ -374,6 +479,10 @@ class ValidatePanelGeometryRequest(BaseModel):
     usable_polygon_3d: list[list[float]]
     candidate_corners_3d: list[list[float]] = Field(..., min_length=4, max_length=4)
     existing_panels_corners_3d: list[list[list[float]]] = Field(default_factory=list)
+    # M12.1 adjacency-bypass — optional for back-compat with older clients.
+    ai_panel_centers: list[list[float]] = Field(default_factory=list)
+    panel_width_m: float | None = None
+    panel_height_m: float | None = None
 
 
 @app.post("/api/projects/{project_id}/validate-panel-geometry")
@@ -388,5 +497,225 @@ def validate_panel_geometry(project_id: str, body: ValidatePanelGeometryRequest)
         usable_polygon_3d=body.usable_polygon_3d,
         candidate_corners_3d=body.candidate_corners_3d,
         existing_panels_corners_3d=body.existing_panels_corners_3d,
+        ai_panel_centers=body.ai_panel_centers,
+        panel_width_m=body.panel_width_m,
+        panel_height_m=body.panel_height_m,
     )
     return {"ok": result.ok, "reason": result.reason, "plane_id": body.plane_id}
+
+
+# ---------------------------------------------------------------------------
+# Lovable integration — GLB upload + per-session panel-count tracking
+# ---------------------------------------------------------------------------
+
+
+def _build_design_from_mesh(loaded, candidates, project_id: str, model_file: str) -> dict:
+    """Run M5 cluster -> M7 assembly on a freshly-loaded mesh and return a
+    contract-shaped dict. Mirrors `scripts.emit_auto.emit` but without writing
+    to disk and without the M10 quality gate (selection=tile_wide), so the
+    user sees every detected plane on their uploaded model.
+    """
+    detected = cluster_planes(loaded.mesh, candidates)
+    gate_warnings = ["Tile-wide result: multiple buildings may be included."]
+
+    assembled = planes_to_contract(
+        loaded.mesh, detected,
+        module=ModuleSpec(),
+        max_planes=12,
+        min_usable_area_m2=4.0,
+        detect_bumps=True,
+        extra_warnings=gate_warnings,
+        method="auto_normal_cluster",
+        panel_source="auto",
+    )
+
+    bbox_min = loaded.mesh.vertices.min(axis=0)
+    bbox_max = loaded.mesh.vertices.max(axis=0)
+    design = RoofDesign(
+        project_id=project_id,
+        model_file=model_file,
+        coordinate_system=CoordinateSystem(),
+        bbox=BBox(min=tuple(bbox_min.tolist()), max=tuple(bbox_max.tolist())),
+        roof_planes=assembled.roof_planes,
+        obstructions=assembled.obstructions,
+        panels=assembled.panels,
+        summary=assembled.summary,
+        quality=assembled.quality,
+    )
+    return json.loads(design.model_dump_json())
+
+
+@app.post("/api/upload")
+async def upload(
+    file: UploadFile = File(...),
+    label: str | None = None,
+):
+    """Accept a GLB, run the auto pipeline, register an in-memory session.
+
+    Returns:
+        {
+          "session_id": "<uuid>",
+          "model_file": "<original filename>",
+          "design":     <RoofDesign>,
+          "diagnostics": {
+            "load_ms": int, "pipeline_ms": int,
+            "n_faces": int, "n_planes": int, "n_panels": int
+          }
+        }
+
+    Errors:
+        400  — not a GLB / empty body.
+        413  — > 50 MB.
+        422  — pipeline produced no roof planes.
+    """
+    _evict_expired_sessions()
+
+    name = file.filename or "upload.glb"
+    if not name.lower().endswith(".glb"):
+        raise HTTPException(status_code=400, detail="file must be a .glb")
+
+    # Stream into a tempfile so we don't hold the full bytes in memory twice.
+    tmp = tempfile.NamedTemporaryFile(suffix=".glb", delete=False)
+    tmp_path = Path(tmp.name)
+    total = 0
+    try:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_UPLOAD_BYTES:
+                tmp.close()
+                tmp_path.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"upload too large (>{MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
+                )
+            tmp.write(chunk)
+    finally:
+        tmp.close()
+
+    if total == 0:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="empty upload")
+
+    session_id = uuid.uuid4().hex
+    log.info("upload START session=%s file=%s bytes=%d", session_id, name, total)
+
+    t0 = time.time()
+    try:
+        loaded = load_glb(tmp_path)
+    except Exception as e:
+        tmp_path.unlink(missing_ok=True)
+        log.exception("upload FAIL session=%s load_glb error", session_id)
+        raise HTTPException(status_code=400, detail=f"could not parse GLB: {e}")
+    load_ms = int((time.time() - t0) * 1000)
+
+    t1 = time.time()
+    try:
+        candidates = select_roof_candidates(loaded.mesh)
+        design = _build_design_from_mesh(
+            loaded, candidates,
+            project_id=session_id,
+            model_file=name,
+        )
+    except Exception as e:
+        tmp_path.unlink(missing_ok=True)
+        log.exception("upload FAIL session=%s pipeline error", session_id)
+        raise HTTPException(status_code=500, detail=f"pipeline error: {e}")
+    pipeline_ms = int((time.time() - t1) * 1000)
+
+    n_planes = len(design.get("roof_planes", []))
+    n_panels = len(design.get("panels", []))
+    if n_planes == 0:
+        tmp_path.unlink(missing_ok=True)
+        log.warning("upload FAIL session=%s no_planes", session_id)
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "No roof planes detected in this model. Make sure the GLB is "
+                "a building scan (not just terrain) and that roof surfaces "
+                "are exposed in the mesh."
+            ),
+        )
+
+    summary = design.get("summary", {}) or {}
+    state = SessionState(
+        session_id=session_id,
+        glb_path=tmp_path,
+        label=label or name,
+        loaded=loaded,
+        candidates=candidates,
+        design=design,
+        panel_count=int(summary.get("panel_count", 0)),
+        system_kwp=float(summary.get("system_kwp", 0.0)),
+        last_panel_source="auto",
+        panel_count_updated_at=datetime.now(timezone.utc),
+    )
+    _SESSIONS[session_id] = state
+
+    log.info(
+        "upload OK    session=%s file=%s load_ms=%d pipeline_ms=%d "
+        "faces=%d planes=%d panels=%d kwp=%.2f",
+        session_id, name, load_ms, pipeline_ms,
+        len(loaded.mesh.faces), n_planes, n_panels, state.system_kwp,
+    )
+
+    return {
+        "session_id": session_id,
+        "model_file": name,
+        "design": design,
+        "diagnostics": {
+            "load_ms": load_ms,
+            "pipeline_ms": pipeline_ms,
+            "n_faces": int(len(loaded.mesh.faces)),
+            "n_planes": n_planes,
+            "n_panels": n_panels,
+        },
+    }
+
+
+class PanelCountUpdate(BaseModel):
+    panel_count: int = Field(..., ge=0)
+    system_kwp: float | None = Field(default=None, ge=0.0)
+    source: str | None = None  # "auto" | "roi" | "seed" | "manual_add" | ...
+
+
+@app.post("/api/sessions/{session_id}/panel-count")
+def post_panel_count(session_id: str, body: PanelCountUpdate):
+    s = _touch_session(session_id)
+    s.panel_count = body.panel_count
+    if body.system_kwp is not None:
+        s.system_kwp = body.system_kwp
+    s.last_panel_source = body.source
+    s.panel_count_updated_at = datetime.now(timezone.utc)
+    log.info(
+        "panel-count session=%s count=%d kwp=%.2f source=%s",
+        session_id, s.panel_count, s.system_kwp, s.last_panel_source,
+    )
+    return {"ok": True, "panel_count": s.panel_count}
+
+
+@app.get("/api/sessions/{session_id}/panel-count")
+def get_panel_count(session_id: str):
+    s = _touch_session(session_id)
+    return {
+        "panel_count": s.panel_count,
+        "system_kwp": s.system_kwp,
+        "source": s.last_panel_source,
+        "updated_at": s.panel_count_updated_at.isoformat() if s.panel_count_updated_at else None,
+    }
+
+
+@app.delete("/api/sessions/{session_id}")
+def delete_session(session_id: str):
+    s = _SESSIONS.pop(session_id, None)
+    if s is None:
+        raise HTTPException(status_code=404, detail=f"unknown session {session_id!r}")
+    try:
+        if s.glb_path.is_file():
+            s.glb_path.unlink()
+    except OSError:
+        pass
+    log.info("session DELETED %s", session_id)
+    return {"ok": True}

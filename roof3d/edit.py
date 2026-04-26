@@ -39,6 +39,9 @@ def validate_panel_placement(
     usable_polygon_3d,
     candidate_corners_3d,
     existing_panels_corners_3d,
+    ai_panel_centers=None,
+    panel_width_m=None,
+    panel_height_m=None,
 ) -> ValidationResult:
     """Return ok=True if the candidate fits inside the supplied plane polygon
     and does not overlap any existing panel on this plane.
@@ -68,11 +71,34 @@ def validate_panel_placement(
     if not cand.is_valid or cand.area < 1e-6:
         return ValidationResult(False, "candidate panel is degenerate")
 
-    # 2 cm tolerance to match the frontend snap module — accommodates
-    # photogrammetry noise at the polygon boundary without letting panels
-    # drift far past the visible roof edge.
-    if not usable.buffer(0.02).contains(cand):
-        return ValidationResult(False, "outside usable area")
+    # Adjacency-bypass: if the candidate sits within one grid step (panel
+    # size + gap + slack) of any AI panel center on this plane, skip
+    # polygon containment. The AI's neighbor proves the area is buildable
+    # even when the alpha-shape boundary is conservative.
+    cand_center_uv = (
+        sum(c[0] for c in cand_uv) / 4.0,
+        sum(c[1] for c in cand_uv) / 4.0,
+    )
+    adjacent = False
+    if ai_panel_centers and panel_width_m and panel_height_m:
+        slack = 0.05  # matches frontend ADJACENCY_SLACK_M
+        gap = 0.02
+        step_u = float(panel_width_m) + gap + slack
+        step_v = float(panel_height_m) + gap + slack
+        for c3 in ai_panel_centers:
+            if not c3 or len(c3) != 3:
+                continue
+            uv = _project_uv(c3, centroid, u, v)
+            if abs(cand_center_uv[0] - uv[0]) <= step_u and abs(cand_center_uv[1] - uv[1]) <= step_v:
+                adjacent = True
+                break
+
+    if not adjacent:
+        # 2 cm tolerance to match the frontend snap module — accommodates
+        # photogrammetry noise at the polygon boundary without letting panels
+        # drift far past the visible roof edge.
+        if not usable.buffer(0.02).contains(cand):
+            return ValidationResult(False, "outside usable area")
 
     for existing in existing_panels_corners_3d or []:
         if not existing or len(existing) != 4:

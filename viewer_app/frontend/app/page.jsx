@@ -380,7 +380,14 @@ export default function Page() {
     const others = effectivePanels.filter(
       (p) => p.plane_id === plane.id && p.id !== panel.id,
     );
-    const v = validatePanelOnPlane({ panel: moved, plane, otherPanels: others });
+    const manualIds = new Set(manualEdits.added.map((m) => m.id));
+    const aiPanelsOnPlane = others.filter((p) => !manualIds.has(p.id));
+    const v = validatePanelOnPlane({
+      panel: moved,
+      plane,
+      otherPanels: others,
+      aiPanelsOnPlane,
+    });
     if (!v.valid) {
       setEditStatus({ kind: "error", message: `Cannot move: ${v.reason}` });
       return;
@@ -458,10 +465,18 @@ export default function Page() {
     const samePlanePanels = (effectivePanels || []).filter(
       (panel) => panel.plane_id === p.id,
     );
+    // AI panels = base panels (post-removal) on this plane, excluding manual
+    // additions. These are the only ones we trust for the "adjacency bypass"
+    // — manual ones can't extend buildability transitively.
+    const manualIds = new Set(manualEdits.added.map((m) => m.id));
+    const aiPanelsOnPlane = samePlanePanels.filter(
+      (panel) => !manualIds.has(panel.id),
+    );
     const result = computeSnapCandidate({
       hitPoint: point,
       plane: p,
       samePlanePanels,
+      aiPanelsOnPlane,
     });
     setPreviewCandidate(result);
   }
@@ -500,6 +515,10 @@ export default function Page() {
       return;
     }
     const url = `${API_BASE}/api/projects/${selected.project_id}/validate-panel-geometry`;
+    const manualIds = new Set(manualEdits.added.map((m) => m.id));
+    const aiPanelCenters = samePlanePanels
+      .filter((p) => !manualIds.has(p.id) && Array.isArray(p?.center) && p.center.length === 3)
+      .map((p) => p.center);
     const body = {
       plane_id: plane.id,
       plane_centroid: plane.centroid,
@@ -513,6 +532,11 @@ export default function Page() {
       existing_panels_corners_3d: samePlanePanels
         .map((p) => p.corners_3d)
         .filter(Boolean),
+      // Adjacency-bypass: if the candidate sits within one grid step of any
+      // of these AI-placed centers, the backend skips polygon containment.
+      ai_panel_centers: aiPanelCenters,
+      panel_width_m: candidate.width_m,
+      panel_height_m: candidate.height_m,
     };
     let response;
     try {
