@@ -12,6 +12,7 @@ Endpoints:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sys
@@ -105,11 +106,12 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 @dataclass
 class SessionState:
     session_id: str
-    glb_path: Path                # tempfile on disk; deleted with the session
+    glb_path: Path                # tempfile on disk; refcounted via _GLB_CACHE
     label: str
     loaded: Any                   # roof3d.loader.LoadedMesh
     candidates: Any               # roof3d.candidates.CandidateResult
     design: dict                  # cached RoofDesign as JSON-shaped dict
+    cache_key: str | None = None  # sha256 of the uploaded GLB; None for legacy
     panel_count: int = 0
     system_kwp: float = 0.0
     last_panel_source: str | None = None
@@ -121,6 +123,54 @@ class SessionState:
 _SESSIONS: dict[str, SessionState] = {}
 
 
+# ---------------------------------------------------------------------------
+# Content-addressed cache for uploaded GLBs.
+#
+# Keyed by sha256 of the file bytes. A re-upload of the same model skips
+# load_glb (~hundreds of ms on a 20 MB GLB) and the M4 candidate pipeline
+# (~seconds). The tempfile, the loaded mesh, the candidates, and the
+# computed RoofDesign are all shared across sessions; the cache entry's
+# refcount tracks how many live sessions reference it, and the tempfile is
+# only unlinked when the last session that referenced it is evicted.
+#
+# Cache entries are not TTL'd separately — they're cleaned up implicitly
+# when their last referencing session evicts (lazy refcount). On Render
+# restart everything resets, which is fine.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GlbCacheEntry:
+    sha256: str
+    glb_path: Path
+    loaded: Any
+    candidates: Any
+    design: dict
+    refcount: int = 0
+
+
+_GLB_CACHE: dict[str, GlbCacheEntry] = {}
+
+
+def _release_cache_entry(cache_key: str | None) -> None:
+    """Decrement refcount on the GLB cache entry; remove the entry and
+    unlink its tempfile when no sessions reference it anymore. Safe to call
+    with cache_key=None (legacy sessions or partial-init failures).
+    """
+    if not cache_key:
+        return
+    entry = _GLB_CACHE.get(cache_key)
+    if entry is None:
+        return
+    entry.refcount -= 1
+    if entry.refcount <= 0:
+        _GLB_CACHE.pop(cache_key, None)
+        try:
+            if entry.glb_path.is_file():
+                entry.glb_path.unlink()
+        except OSError:
+            pass
+
+
 def _evict_expired_sessions() -> None:
     """Lazy TTL sweep — called on every session-touching request."""
     now = datetime.now(timezone.utc)
@@ -130,11 +180,18 @@ def _evict_expired_sessions() -> None:
         s = _SESSIONS.pop(sid, None)
         if s is None:
             continue
-        try:
-            if s.glb_path.is_file():
-                s.glb_path.unlink()
-        except OSError:
-            pass
+        # Refcount-down the shared GLB cache entry. The tempfile is only
+        # actually unlinked when the last session referencing this hash is
+        # evicted — re-uploads of the same GLB before then are free.
+        if s.cache_key:
+            _release_cache_entry(s.cache_key)
+        else:
+            # Legacy / non-cached session — file is private to this session.
+            try:
+                if s.glb_path.is_file():
+                    s.glb_path.unlink()
+            except OSError:
+                pass
         log.info("session EVICTED %s (idle > %d min)", sid, SESSION_TTL_MIN)
 
 
@@ -574,9 +631,15 @@ async def upload(
     if not name.lower().endswith(".glb"):
         raise HTTPException(status_code=400, detail="file must be a .glb")
 
-    # Stream into a tempfile so we don't hold the full bytes in memory twice.
+    # Stream into a tempfile while hashing on the fly. The hash lets us
+    # short-circuit re-uploads of the same GLB — load_glb + the M4 candidate
+    # pipeline are by far the most expensive parts of /upload, and the
+    # frontend often re-uploads the same file (e.g. user navigates away and
+    # comes back). The tempfile is the canonical disk copy on cache miss
+    # and is discarded on cache hit (we keep the cached one instead).
     tmp = tempfile.NamedTemporaryFile(suffix=".glb", delete=False)
     tmp_path = Path(tmp.name)
+    hasher = hashlib.sha256()
     total = 0
     try:
         while True:
@@ -591,6 +654,7 @@ async def upload(
                     status_code=413,
                     detail=f"upload too large (>{MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
                 )
+            hasher.update(chunk)
             tmp.write(chunk)
     finally:
         tmp.close()
@@ -599,8 +663,58 @@ async def upload(
         tmp_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="empty upload")
 
+    sha256 = hasher.hexdigest()
     session_id = uuid.uuid4().hex
-    log.info("upload START session=%s file=%s bytes=%d", session_id, name, total)
+
+    # Cache hit — reuse the existing entry's loaded mesh, candidates, and
+    # design. Discard the freshly-streamed tempfile; the cached one is the
+    # source of truth (and may be referenced by other live sessions).
+    cached_entry = _GLB_CACHE.get(sha256)
+    cache_hit = cached_entry is not None and cached_entry.glb_path.is_file()
+    if cache_hit:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        cached_entry.refcount += 1
+        design = cached_entry.design
+        summary = design.get("summary", {}) or {}
+        state = SessionState(
+            session_id=session_id,
+            glb_path=cached_entry.glb_path,
+            label=label or name,
+            loaded=cached_entry.loaded,
+            candidates=cached_entry.candidates,
+            design=design,
+            cache_key=sha256,
+            panel_count=int(summary.get("panel_count", 0)),
+            system_kwp=float(summary.get("system_kwp", 0.0)),
+            last_panel_source="auto",
+            panel_count_updated_at=datetime.now(timezone.utc),
+        )
+        _SESSIONS[session_id] = state
+        log.info(
+            "upload CACHED session=%s file=%s sha=%s refcount=%d planes=%d panels=%d",
+            session_id, name, sha256[:12], cached_entry.refcount,
+            len(design.get("roof_planes", [])), len(design.get("panels", [])),
+        )
+        return {
+            "session_id": session_id,
+            "model_file": name,
+            "design": design,
+            "diagnostics": {
+                "load_ms": 0,
+                "pipeline_ms": 0,
+                "n_faces": int(len(cached_entry.loaded.mesh.faces)),
+                "n_planes": len(design.get("roof_planes", [])),
+                "n_panels": len(design.get("panels", [])),
+                "cached": True,
+                "sha256": sha256,
+            },
+        }
+
+    log.info("upload START session=%s file=%s bytes=%d sha=%s",
+             session_id, name, total, sha256[:12])
 
     t0 = time.time()
     try:
@@ -639,6 +753,18 @@ async def upload(
             ),
         )
 
+    # Cache miss path — register the result so the next upload of the same
+    # GLB is instant.
+    entry = GlbCacheEntry(
+        sha256=sha256,
+        glb_path=tmp_path,
+        loaded=loaded,
+        candidates=candidates,
+        design=design,
+        refcount=1,
+    )
+    _GLB_CACHE[sha256] = entry
+
     summary = design.get("summary", {}) or {}
     state = SessionState(
         session_id=session_id,
@@ -647,6 +773,7 @@ async def upload(
         loaded=loaded,
         candidates=candidates,
         design=design,
+        cache_key=sha256,
         panel_count=int(summary.get("panel_count", 0)),
         system_kwp=float(summary.get("system_kwp", 0.0)),
         last_panel_source="auto",
@@ -655,9 +782,9 @@ async def upload(
     _SESSIONS[session_id] = state
 
     log.info(
-        "upload OK    session=%s file=%s load_ms=%d pipeline_ms=%d "
+        "upload OK    session=%s file=%s sha=%s load_ms=%d pipeline_ms=%d "
         "faces=%d planes=%d panels=%d kwp=%.2f",
-        session_id, name, load_ms, pipeline_ms,
+        session_id, name, sha256[:12], load_ms, pipeline_ms,
         len(loaded.mesh.faces), n_planes, n_panels, state.system_kwp,
     )
 
@@ -671,6 +798,8 @@ async def upload(
             "n_faces": int(len(loaded.mesh.faces)),
             "n_planes": n_planes,
             "n_panels": n_panels,
+            "cached": False,
+            "sha256": sha256,
         },
     }
 
