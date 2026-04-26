@@ -34,6 +34,11 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ModuleSpec:
+    # Defaults reference a mainstream 2024-2025 residential module:
+    # M10 108-half-cell (e.g. LONGi LR5-54HTH-440M, JA Solar JAM54S30,
+    # Trina TSM-NEG9R.28). Nominal 1.722 m × 1.134 m, 440 Wp → 226 W/m².
+    # gap_m matches typical thermal-expansion guidance; lift_m is the small
+    # offset along the plane normal to avoid z-fighting in the viewer.
     width_m: float = 1.13
     height_m: float = 1.72
     watt_peak: int = 440

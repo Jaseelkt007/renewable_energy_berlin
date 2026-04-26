@@ -1,20 +1,30 @@
 "use client";
 
 import { useMemo } from "react";
+import { useLoader } from "@react-three/fiber";
 import * as THREE from "three";
 
 /**
  * Renders the small set of panels that need a per-panel color: manual
- * (green), candidate-while-validating (yellow), and rejected-flash (red).
+ * (committed user-added), candidate (preview), rejected (flash), selected
+ * (move-mode highlight).
  *
  * Each panel is its own mesh (rather than one batched BufferGeometry) so the
  * color can vary per-panel and so the click-to-remove path can attach
  * `userData.panelId` on the mesh — `event.object.userData.panelId` is then a
  * direct lookup. We never render more than ~50 of these at once in practice
  * (manual edits are interactive), so the cost of N draw calls is negligible.
+ *
+ * The committed `manual` source uses the same panel texture as PanelOverlay
+ * so user-added panels look identical to AI-placed ones. Transient UI states
+ * (candidate, rejected, selected) keep flat colors — a green-tinted texture
+ * reads worse than a clean colored rect when the panel is supposed to call
+ * attention to itself.
  */
+const PANEL_TEXTURE_URL = "/textures/panel.png";
+
 const COLORS = {
-  manual: "#16a34a",
+  manual: "#0b0e2c",        // ignored when textured; kept for fallback
   candidate: "#facc15",
   "candidate-valid": "#facc15",
   "candidate-invalid": "#dc2626",
@@ -29,12 +39,45 @@ const TRANSPARENT_SOURCES = new Set([
   "rejected",
 ]);
 
+const TEXTURED_SOURCES = new Set(["manual"]);
+
+function uvsForPanel(longSideAlongV) {
+  if (longSideAlongV) {
+    return new Float32Array([
+      0, 1,
+      0, 0,
+      1, 0,
+      0, 1,
+      1, 0,
+      1, 1,
+    ]);
+  }
+  return new Float32Array([
+    0, 0,
+    1, 0,
+    1, 1,
+    0, 0,
+    1, 1,
+    0, 1,
+  ]);
+}
+
 export default function ManualPanelOverlay({
   panels = [],
   source = "manual",
   onPanelClick,
   clickable = false,
 }) {
+  const texture = useLoader(THREE.TextureLoader, PANEL_TEXTURE_URL);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 8;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+
+  const textured = TEXTURED_SOURCES.has(source);
+
   const meshes = useMemo(() => {
     return panels
       .filter((p) => Array.isArray(p?.corners_3d) && p.corners_3d.length === 4)
@@ -50,12 +93,17 @@ export default function ManualPanelOverlay({
         ]);
         const g = new THREE.BufferGeometry();
         g.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        if (textured) {
+          const uvs = uvsForPanel((p.height_m ?? 0) >= (p.width_m ?? 0));
+          g.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+        }
         g.computeVertexNormals();
         return { id: p.id, geometry: g };
       });
-  }, [panels]);
+  }, [panels, textured]);
 
   const color = COLORS[source] || COLORS.manual;
+  const isTransparent = TRANSPARENT_SOURCES.has(source);
 
   return (
     <group>
@@ -74,13 +122,14 @@ export default function ManualPanelOverlay({
           }
         >
           <meshStandardMaterial
-            color={color}
+            map={textured ? texture : null}
+            color={textured ? "#ffffff" : color}
             side={THREE.DoubleSide}
-            metalness={0.35}
-            roughness={0.55}
-            transparent={TRANSPARENT_SOURCES.has(source)}
-            opacity={TRANSPARENT_SOURCES.has(source) ? 0.55 : 1.0}
-            depthWrite={!TRANSPARENT_SOURCES.has(source)}
+            metalness={textured ? 0.5 : 0.35}
+            roughness={textured ? 0.35 : 0.55}
+            transparent={isTransparent}
+            opacity={isTransparent ? 0.55 : 1.0}
+            depthWrite={!isTransparent}
           />
         </mesh>
       ))}
