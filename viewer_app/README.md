@@ -1,4 +1,4 @@
-# viewer_app — visualization bridge
+# viewer_app — visualization bridge - ONLY FOR VISUALIZATION OF 3D FILE
 
 Browser viewer for the AI Renewable Designer roof pipeline (M0–M8). It proves the
 generated roof JSON aligns with each GLB and provides interactive verification:

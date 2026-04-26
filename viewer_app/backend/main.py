@@ -873,6 +873,7 @@ from .engine.price_catalog import (
     PRICE_CATALOG as _PRICE_CATALOG,
     PV_MODULE_450WP as _PV_MODULE_450WP,
 )
+from .engine.tier_diff import compute_tier_diffs as _compute_tier_diffs
 
 
 class DesignRequest(BaseModel):
@@ -945,7 +946,9 @@ async def post_design(req: DesignRequest):
 @app.post("/api/design/all-modes")
 async def post_design_all_modes(req: DesignRequest):
     """
-    Generate Budget + Balanced + Premium BoMs in parallel.
+    Generate Budget + Balanced + Premium BoMs in parallel, then compute the
+    tier_diffs block (Compare-card "Premium adds" / upgrades) from them.
+
     Cold cache: ~25-30s (vs ~60-75s sequential). Warm cache: <100ms.
     """
     loop = _asyncio.get_event_loop()
@@ -958,7 +961,13 @@ async def post_design_all_modes(req: DesignRequest):
         for mode in ("budget", "balanced", "premium")
     ]
     budget, balanced, premium = await _asyncio.gather(*tasks)
-    return {"budget": budget, "balanced": balanced, "premium": premium}
+    tier_diffs = _compute_tier_diffs(budget, balanced, premium)
+    return {
+        "budget": budget,
+        "balanced": balanced,
+        "premium": premium,
+        "tier_diffs": tier_diffs,
+    }
 
 
 @app.post("/api/design/refine")

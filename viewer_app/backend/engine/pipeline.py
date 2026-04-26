@@ -30,6 +30,7 @@ from bom_generator import generate_bill_of_materials  # noqa: E402
 from .economics import compute_economics  # noqa: E402
 from .knn import get_corpus_stats, get_similar_projects  # noqa: E402
 from .llm import BomResponse, MODEL_DESIGN, MODEL_REFINE, call_llm  # noqa: E402
+from .sizing import compute_targets  # noqa: E402
 
 log = logging.getLogger("pipeline")
 
@@ -128,6 +129,14 @@ def design_system(
         neighbors = []
         confidence = "low"
 
+    # ── Sizing targets — computed BEFORE the LLM so it has explicit guidance ──
+    # (HTW Berlin Weniger curve + Reonic median 1.86 kWp/MWh + 7 kWp floor.)
+    targets = compute_targets(profile, mode, max_panels)
+    log.info(
+        "sizing %s: panels=%d (max %d) battery=%dkWh hp=%.1fkW",
+        mode, targets["panels"], max_panels, targets["battery_kwh"], targets["hp_kw"],
+    )
+
     # ── Layer C: Gemini designer (with rule fallback inside call_llm) ──
     model = MODEL_REFINE if use_refine_model else MODEL_DESIGN
     response: BomResponse = call_llm(
@@ -138,7 +147,19 @@ def design_system(
         rule_bom=rule_bom,
         overrides=overrides,
         model=model,
+        targets=targets,
     )
+
+    # ── Post-LLM oversize sanity check ──
+    # Flag (do not auto-correct) when LLM emits PV ≥ 1.5× the recommended target.
+    # Useful signal for future iteration; the customer-facing fix is the prompt
+    # itself + tighter mode tagline guidance.
+    if targets["panels"] > 0 and response.system_summary.panels > targets["panels"] * 1.5:
+        log.warning(
+            "LLM oversized PV in %s: emitted %d panels vs target %d (%.1f× target)",
+            mode, response.system_summary.panels, targets["panels"],
+            response.system_summary.panels / max(1, targets["panels"]),
+        )
 
     bom_dump = [b.model_dump() for b in response.bom]
     summary_dump = response.system_summary.model_dump()

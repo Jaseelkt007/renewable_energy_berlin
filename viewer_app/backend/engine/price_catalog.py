@@ -220,10 +220,61 @@ PRICE_FALLBACK: PriceEntry = {
 }
 
 
+# ---------------------------------------------------------------------------
+# SKU aliases — common LLM near-misses that should resolve to a catalog entry.
+# The LLM occasionally drops branding words ("LFP") or normalizes
+# capitalization. This map lets `lookup()` recover instead of falling through
+# to the €200 PRICE_FALLBACK and producing a phantom-cheap line in the BoM.
+# ---------------------------------------------------------------------------
+SKU_ALIASES: dict[str, str] = {
+    # Battery: LFP variants often arrive without the "LFP" word
+    "Battery 10kWh":             "Battery LFP 10kWh",
+    "Battery 15kWh":             "Battery LFP 15kWh",
+    "Battery LFP 7kWh":          "Battery 7kWh",
+    "Battery LFP 5kWh":          "Battery LFP 5kWh",  # in catalog but here for safety
+
+    # Heat-pump near-misses
+    "Heat Pump 5kW":             "Heat Pump 5.5kW 230V",
+    "Heat Pump 5kW 230V":        "Heat Pump 5.5kW 230V",
+    "Heat Pump 5.5kW":           "Heat Pump 5.5kW 230V",
+    "Heat Pump 7kW":             "Heat Pump 7.5kW 230V",
+    "Heat Pump 7kW 230V":        "Heat Pump 7.5kW 230V",
+    "Heat Pump 7.5kW":           "Heat Pump 7.5kW 230V",
+    "Heat Pump 8kW 230V":        "Heat Pump 8kW",
+    "Heat Pump 8kW 400V":        "Heat Pump 8kW",
+    "Heat Pump 10kW":            "Heat Pump 10.5kW 400V",
+    "Heat Pump 10kW 400V":       "Heat Pump 10.5kW 400V",
+    "Heat Pump 10.5kW":          "Heat Pump 10.5kW 400V",
+    "Heat Pump 12kW":            "Heat Pump 12.5kW 400V",
+    "Heat Pump 12kW 400V":       "Heat Pump 12.5kW 400V",
+    "Heat Pump 12.5kW":          "Heat Pump 12.5kW 400V",
+
+    # Wallbox common variants
+    "Wallbox 11kW":              "Wallbox",
+    "Wallbox 22kW":              "Wallbox 22kW v2",
+
+    # Service / install fees with truncated suffix
+    "All-Inclusive Package":     "All-Inclusive Package",  # already in catalog
+    "Heat Pump Installation":    "Heat Pump Installation Compact B",
+    "Garden Work":               "Garden Work Small B",
+    "Hot Water Storage 200L":    "Hot Water Storage 250L",
+}
+
+
 def lookup(part_name: str, category: str | None = None) -> PriceEntry:
-    """Resolve a BoM line to a PriceEntry. Order: exact SKU → category → fallback."""
+    """Resolve a BoM line to a PriceEntry.
+
+    Order:
+      1. Exact match in PRICE_CATALOG
+      2. Aliased match (LLM near-miss → canonical catalog SKU)
+      3. Category fallback (PRICE_BY_CATEGORY)
+      4. Final PRICE_FALLBACK (should be rare; logged elsewhere)
+    """
     if part_name in PRICE_CATALOG:
         return PRICE_CATALOG[part_name]
+    aliased = SKU_ALIASES.get(part_name)
+    if aliased and aliased in PRICE_CATALOG:
+        return PRICE_CATALOG[aliased]
     if category and category in PRICE_BY_CATEGORY:
         return PRICE_BY_CATEGORY[category]
     return PRICE_FALLBACK

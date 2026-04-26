@@ -85,24 +85,33 @@ class BomResponse(BaseModel):
 PROMPT_TEMPLATE = """You are a senior solar/energy installer in Germany.
 Generate a Bill of Materials (BoM) for the customer below.
 
-{objective}{no_pv_overlay}{overrides}STRICT RULES:
+{objective}{no_pv_overlay}{overrides}SIZING TARGETS (sized to demand, validated against HTW Berlin Weniger curve and 580 historical Reonic projects):
+- Recommended panels:        {target_panels}    (out of {max_panels} max — DO NOT exceed)
+- Recommended battery (kWh): {target_battery_kwh}    (snap to catalog: 5 / 7 / 10 / 15)
+- Recommended heat pump:     {target_hp_kw} kW   (only when fossil heating is being replaced; pick the closest catalog tier)
+- Sizing rationale:          {sizing_rationale}
+
+STRICT RULES:
 1. Only use part_name values from the SKU catalog (exact spelling).
 2. Include PV + battery + HP + wallbox AS APPROPRIATE.
-3. If max_panels == 0: do NOT include any PV/inverter/scaffolding/DC/substructure items.
-4. For HP: ALWAYS bundle hydraulic station, controller, buffer storage, hot water storage,
-   install fee, and garden work.
-5. Wallbox: include only if customer has_ev = true.
-6. Each line needs a one-sentence rationale aimed at the homeowner (≤120 chars).
-7. Compute system_summary: pv_kwp = panels * 0.45 kWp, battery_kwh from the battery line,
-   hp_kw from the heat pump line, wallbox_count from wallbox lines.
-8. If you exclude PV (e.g. heritage building), set notes explaining why.
+3. PV size: emit Substructure/DC Install/Scaffolding lines with quantity = recommended panels (NOT max_panels).
+   Deviating from the recommended panel count is allowed only if you justify it in the notes.
+4. Battery: pick the catalog SKU whose kWh matches the recommended battery size.
+5. Heat pump: pick the catalog HP whose kW matches the recommended heat pump size.
+6. If max_panels == 0: do NOT include any PV/inverter/scaffolding/DC/substructure items.
+7. For HP: ALWAYS bundle hydraulic station, smart heating controller, buffer storage, hot water storage,
+   install fee (Heat Pump Installation Compact B), and Garden Work Small B.
+8. Wallbox: include only if customer has_ev = true.
+9. Each line needs a one-sentence rationale aimed at the homeowner (≤120 chars).
+10. Compute system_summary: pv_kwp = panels * 0.45 kWp, battery_kwh from the battery line,
+    hp_kw from the heat pump line, wallbox_count from wallbox lines.
+11. If you exclude PV (e.g. heritage building), set notes explaining why.
+12. Notes field: lead with the mode tagline shown in the OBJECTIVE.
 
 CUSTOMER PROFILE:
 {profile_json}
 
-ROOF CAPACITY (max panels available): {max_panels}
-
-SIMILAR PAST PROJECTS (use as evidence for what installers historically chose):
+SIMILAR PAST PROJECTS (use as evidence for what Reonic installers historically chose for this kind of customer):
 {neighbors_summary}
 
 RULE-BASED BASELINE (deterministic safety net — you may deviate with reason):
@@ -115,21 +124,48 @@ Return the final BoM as JSON matching the provided schema.
 """
 
 OBJECTIVE_BUDGET = (
-    "OBJECTIVE: Minimize upfront cost. Skip optional items (Optional Solar Credit, "
-    "AC Surge Protection, Selective Circuit Breaker) unless payback < 5 years.\n"
-    "Prefer smaller battery (5kWh or 7kWh). Skip wallbox if customer doesn't have EV.\n\n"
+    "OBJECTIVE: Lowest upfront cost. Cover the customer's electricity demand, nothing more.\n"
+    "TIER TAGLINE (use verbatim at start of notes): 'Fastest payback. Smallest CapEx that still covers your needs.'\n"
+    "INCLUDED (lean core):\n"
+    "  PV substructure / DC install / scaffolding (per panel),\n"
+    "  Install Inverter, Battery (recommended size), Install Battery Storage,\n"
+    "  Heat pump bundle (when applicable): Hydraulic Station, Smart Heating Controller,\n"
+    "    Buffer Storage 200L, Hot Water Storage 300L, Heat Pump Installation Compact B, Garden Work Small B,\n"
+    "  Wallbox + Install Wallbox (only if has_ev),\n"
+    "  Planning & Consulting, Travel & Logistics Flat Rate.\n"
+    "EXCLUDED (Budget MUST NOT add): AC Surge Protection, Selective Circuit Breaker (SLS),\n"
+    "  Sub-Distribution Board, Smart Guard 63A, Power Optimizer 600W, Equipotential Bonding,\n"
+    "  Energy Management System, Energy Manager B, Optional PV Insurance, All-Inclusive Package B,\n"
+    "  Meter Cabinet replacements (only Repair if strictly needed). Optional Solar Credit ALLOWED.\n\n"
 )
 
 OBJECTIVE_BALANCED = (
-    "OBJECTIVE: Standard installer recommendation, balanced ROI. "
-    "Include common items (Install Battery Storage, Travel & Logistics, Planning & Consulting, "
-    "AC Surge Protection, Selective Circuit Breaker) when relevant.\n\n"
+    "OBJECTIVE: Best long-term return. Mainstream installer configuration.\n"
+    "TIER TAGLINE (use verbatim at start of notes): 'Best NPV over 25 years. Standard installer recommendation.'\n"
+    "INCLUDED (lean core + protection essentials):\n"
+    "  All Budget items, PLUS:\n"
+    "  AC Surge Protection, Selective Circuit Breaker (SLS),\n"
+    "  All-Inclusive Package B (extended warranty + monitoring + after-care),\n"
+    "  Smart Heating Controller — required when HP present (already in HP bundle).\n"
+    "EXCLUDED (Balanced MUST NOT add — these are Premium-only):\n"
+    "  Sub-Distribution Board, Smart Guard 63A, Power Optimizer 600W, Equipotential Bonding,\n"
+    "  Energy Management System, Energy Manager B, Optional PV Insurance,\n"
+    "  Automatic Transfer Switch, Install Emergency Power Box.\n\n"
 )
 
 OBJECTIVE_PREMIUM = (
-    "OBJECTIVE: Maximize self-sufficiency and future-proofing. "
-    "Prefer largest battery (LFP 15kWh), full HP bundle, surge protection, smart controllers, "
-    "and Energy Manager B if applicable.\n\n"
+    "OBJECTIVE: Maximum self-sufficiency with disciplined economics. Premium = QUALITY and INTEGRATION, NOT raw oversize.\n"
+    "TIER TAGLINE (use verbatim at start of notes): 'Maximum self-sufficiency. Premium hardware integration. Future-proof for EV / VPP / dynamic tariffs.'\n"
+    "INCLUDED (lean core + ALL protection + integration):\n"
+    "  All Balanced items (incl. AC Surge, SLS, All-Inclusive Package B), PLUS:\n"
+    "  Sub-Distribution Board (electrical infrastructure upgrade),\n"
+    "  Smart Guard 63A (3-phase grid protection relay),\n"
+    "  Power Optimizer 600W — qty = panel count (per-panel optimization),\n"
+    "  Equipotential Bonding (DIN VDE 0100 compliance),\n"
+    "  Energy Management System (PV+battery+HP coordination, VPP-ready),\n"
+    "  Optional PV Insurance (1st-year premium).\n"
+    "These are the actual top-third Reonic project SKUs (74% / 72% / 35% / 22% / 27% / 18% / 36% population in historical data — not invented add-ons).\n"
+    "DO NOT oversize PV beyond the recommended panel count just because Premium 'feels bigger'.\n\n"
 )
 
 NO_PV_OVERLAY = (
@@ -186,6 +222,7 @@ def build_prompt(
     neighbors: list[dict],
     rule_bom: list[dict],
     overrides: Optional[dict] = None,
+    targets: Optional[dict] = None,
 ) -> str:
     objective = OBJECTIVES.get(mode, OBJECTIVE_BALANCED)
     no_pv_overlay = NO_PV_OVERLAY if max_panels == 0 else ""
@@ -196,12 +233,23 @@ def build_prompt(
     )
     rule_bom_summary = _summarize_rule_bom(rule_bom) if rule_bom else "  (rule engine produced empty output)"
 
+    # Sizing targets — fall back to defensive defaults if pipeline forgot to pass them
+    targets = targets or {}
+    target_panels_v = targets.get("panels", max_panels)
+    target_battery_kwh_v = targets.get("battery_kwh", 10)
+    target_hp_kw_v = targets.get("hp_kw", 0.0)
+    sizing_rationale = targets.get("rule_summary", "Use catalog-tier sizing.")
+
     return PROMPT_TEMPLATE.format(
         objective=objective,
         no_pv_overlay=no_pv_overlay,
         overrides=overrides_clause,
         profile_json=json.dumps(profile, indent=2, default=str),
         max_panels=max_panels,
+        target_panels=target_panels_v,
+        target_battery_kwh=target_battery_kwh_v,
+        target_hp_kw=f"{target_hp_kw_v:.1f}" if target_hp_kw_v > 0 else "n/a (no fossil heating)",
+        sizing_rationale=sizing_rationale,
         neighbors_summary=neighbors_summary,
         rule_bom_summary=rule_bom_summary,
         catalog=catalog_for_prompt(),
@@ -247,8 +295,25 @@ def _auto_rationale(part_name: str, profile: dict) -> str:
     return "Standard component recommended for this system."
 
 
-def _system_summary_from_bom(bom: list[BomLine], panels_used: int) -> SystemSummary:
-    """Derive system summary numbers from the BoM lines."""
+def _system_summary_from_bom(bom: list[BomLine], max_panels: int) -> SystemSummary:
+    """
+    Derive system summary numbers from the BoM lines.
+
+    Panel count is read from the actual emitted Substructure quantity (the
+    LLM may have sized down from max_panels per the demand-anchored target),
+    so the implicit PV-Module row in pricing matches the real install size.
+    Falls back to max_panels if no Substructure line is found.
+    """
+    # ── Real panel count: max qty across any Substructure line; cap by max_panels ──
+    sub_qtys = [
+        int(line.quantity)
+        for line in bom
+        if line.part_name.startswith("Substructure")
+    ]
+    panels_used = (
+        min(max(sub_qtys), max_panels) if sub_qtys and max_panels > 0
+        else (max_panels if max_panels > 0 else 0)
+    )
     pv_kwp = round(panels_used * 0.45, 2)
 
     battery_kwh = 0.0
@@ -315,6 +380,7 @@ def call_llm(
     rule_bom: list[dict],
     overrides: Optional[dict] = None,
     model: str = MODEL_DESIGN,
+    targets: Optional[dict] = None,
 ) -> BomResponse:
     """
     Generate a BoM via Gemini, with rule fallback on any failure.
@@ -327,11 +393,14 @@ def call_llm(
         rule_bom:   result of bom_generator.generate_bill_of_materials
         overrides:  optional refinement constraints
         model:      Gemini model id (use MODEL_REFINE for cheap edits)
+        targets:    sizing targets dict from sizing.compute_targets() — drives
+                    the prompt's recommended panels / battery / HP. When None,
+                    defensive defaults apply (legacy behavior).
 
     Returns:
         BomResponse with validated SKUs, system_summary, and notes.
     """
-    prompt = build_prompt(profile, max_panels, mode, neighbors, rule_bom, overrides)
+    prompt = build_prompt(profile, max_panels, mode, neighbors, rule_bom, overrides, targets)
 
     try:
         from google.genai import types
