@@ -719,3 +719,139 @@ def delete_session(session_id: str):
         pass
     log.info("session DELETED %s", session_id)
     return {"ok": True}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AI RENEWABLE DESIGNER — 3-layer engine (rules + kNN + Gemini)
+# Imports kept local to avoid touching the roof-viewer's import surface.
+# See viewer_app/backend/engine/ for catalog, knn, llm, pipeline modules.
+# ═══════════════════════════════════════════════════════════════════════════
+
+import asyncio as _asyncio  # alias to avoid colliding if file later imports asyncio
+from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
+from typing import Optional as _Optional
+
+from .engine.pipeline import (
+    cache_stats as _design_cache_stats,
+    clear_cache as _design_clear_cache,
+    corpus_stats as _design_corpus_stats,
+    design_system as _design_system,
+)
+from .engine.price_catalog import (
+    CATALOG_VERSION as _CATALOG_VERSION,
+    INVERTER_PRICES as _INVERTER_PRICES,
+    PRICE_BY_CATEGORY as _PRICE_BY_CATEGORY,
+    PRICE_CATALOG as _PRICE_CATALOG,
+    PV_MODULE_450WP as _PV_MODULE_450WP,
+)
+
+
+class DesignRequest(BaseModel):
+    profile: dict = Field(
+        description="Customer profile. Required: energy_demand_wh. "
+                    "Optional: has_ev, heating_existing_type, etc."
+    )
+    max_panels: int = Field(ge=0, le=200, description="Roof capacity. 0 = no PV.")
+    mode: str = Field(default="balanced", description="budget | balanced | premium")
+    overrides: _Optional[dict] = Field(default=None,
+        description="Refinement constraints: {battery_kwh, include_hp, "
+                    "include_wallbox, include_surge}")
+    use_refine_model: bool = Field(default=False,
+        description="If True, use cheaper/faster Flash Lite (good for refinement)")
+
+
+# Thread pool for parallel LLM calls (Gemini SDK is synchronous)
+_design_executor = _ThreadPoolExecutor(max_workers=4)
+
+
+@app.get("/api/design/info")
+def design_info():
+    """Health + corpus stats for the design engine."""
+    return {
+        "service": "Reonic AI Renewable Designer",
+        "corpus": _design_corpus_stats(),
+        "catalog_version": _CATALOG_VERSION,
+        "endpoints": [
+            "POST /api/design",
+            "POST /api/design/all-modes",
+            "POST /api/design/refine",
+            "GET  /api/catalog",
+            "GET  /api/design/cache/stats",
+            "POST /api/design/cache/clear",
+        ],
+    }
+
+
+@app.get("/api/catalog")
+def get_catalog():
+    """
+    Canonical price catalog. Used by the frontend's Installation Estimator
+    (deterministic path) so its prices stay aligned with what the Model
+    Calculator (backend pricing path) would charge for the same SKUs.
+
+    Run a build-time codegen step (e.g. scripts/sync-prices.ts) that fetches
+    this endpoint and writes the data into src/lib/componentPrices.ts. Drift
+    becomes visible in the diff.
+    """
+    return {
+        "version": _CATALOG_VERSION,
+        "pv_module_450wp": _PV_MODULE_450WP,
+        "inverter_prices": _INVERTER_PRICES,
+        "catalog": _PRICE_CATALOG,
+        "category_fallback": _PRICE_BY_CATEGORY,
+    }
+
+
+@app.post("/api/design")
+async def post_design(req: DesignRequest):
+    """Generate one BoM for the requested mode."""
+    loop = _asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        _design_executor,
+        _design_system,
+        req.profile, req.max_panels, req.mode, req.overrides, req.use_refine_model,
+    )
+
+
+@app.post("/api/design/all-modes")
+async def post_design_all_modes(req: DesignRequest):
+    """
+    Generate Budget + Balanced + Premium BoMs in parallel.
+    Cold cache: ~25-30s (vs ~60-75s sequential). Warm cache: <100ms.
+    """
+    loop = _asyncio.get_event_loop()
+    tasks = [
+        loop.run_in_executor(
+            _design_executor,
+            _design_system,
+            req.profile, req.max_panels, mode, req.overrides, req.use_refine_model,
+        )
+        for mode in ("budget", "balanced", "premium")
+    ]
+    budget, balanced, premium = await _asyncio.gather(*tasks)
+    return {"budget": budget, "balanced": balanced, "premium": premium}
+
+
+@app.post("/api/design/refine")
+async def post_design_refine(req: DesignRequest):
+    """
+    Convenience endpoint for the Refinement drawer.
+    Forces use_refine_model=True (Flash Lite) for cheaper/faster iteration.
+    """
+    loop = _asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        _design_executor,
+        _design_system,
+        req.profile, req.max_panels, req.mode, req.overrides, True,
+    )
+
+
+@app.get("/api/design/cache/stats")
+def get_design_cache_stats():
+    return _design_cache_stats()
+
+
+@app.post("/api/design/cache/clear")
+def post_design_cache_clear():
+    n = _design_clear_cache()
+    return {"cleared": n}
