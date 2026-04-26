@@ -62,6 +62,7 @@ export default function RoofScene({
   // M12.1 move mode
   selectedPanelId = null,
   onSelectPanel,
+  panelThicknessM = 0,
 }) {
   const { center, size } = useMemo(() => bboxView(roof?.bbox), [roof]);
   const camPos = useMemo(
@@ -137,12 +138,13 @@ export default function RoofScene({
         )}
         {overlays.showPanels && (
           <>
-            <PanelOverlay panels={autoPanels} />
+            <PanelOverlay panels={autoPanels} thicknessM={panelThicknessM} />
             <ManualPanelOverlay
               panels={manualAddedPanels}
               source="manual"
               clickable={editMode === "remove"}
               onPanelClick={onRemovePanelClick}
+              thicknessM={panelThicknessM}
             />
             {editMode === "remove" && (
               <PanelClickTargets

@@ -88,6 +88,10 @@ export default function Page() {
   const [previewCandidate, setPreviewCandidate] = useState(null);
   // M12.1 — move mode: id of the currently-selected panel (auto or manual).
   const [selectedPanelId, setSelectedPanelId] = useState(null);
+  // Visual panel thickness in millimeters. Default 40 mm matches the real
+  // frame thickness of mainstream M10 modules (35-40 mm). Pure rendering —
+  // not part of the geometry contract.
+  const [panelThicknessMm, setPanelThicknessMm] = useState(40);
 
   // Fetch project list once on mount.
   useEffect(() => {
@@ -624,6 +628,7 @@ export default function Page() {
             onAddHover={handleAddHover}
             onAddHoverClear={handleAddHoverClear}
             previewCandidate={previewCandidate}
+            panelThicknessM={panelThicknessMm / 1000}
             selectedPanelId={selectedPanelId}
             onSelectPanel={handleSelectPanel}
             onRemovePanelClick={handleRemovePanel}
@@ -684,6 +689,8 @@ export default function Page() {
             added: manualEdits.added.length,
             removed: manualEdits.removedIds.length,
           }}
+          panelThicknessMm={panelThicknessMm}
+          setPanelThicknessMm={setPanelThicknessMm}
         />
         <Legend />
         <PanelsByPlane roof={effectiveRoofForView} />

@@ -31,6 +31,10 @@ export default function OverlayControls({
   hasEdits,
   onClearEdits,
   editCounts,
+  // Visual-only — extrudes the textured panels along the plane normal so
+  // they look physically substantial. Doesn't affect placement or kWp.
+  panelThicknessMm,
+  setPanelThicknessMm,
 }) {
   const showResultModeToggle =
     Array.isArray(availableModes) && availableModes.length > 1 && setMode;
@@ -173,6 +177,27 @@ export default function OverlayControls({
               </button>
             </div>
           )}
+        </div>
+      )}
+
+      {setPanelThicknessMm && (
+        <div style={{ marginBottom: 14 }}>
+          <h4>Panel thickness</h4>
+          <label style={{ display: "block", marginBottom: 4, fontSize: 12 }}>
+            <strong>{panelThicknessMm} mm</strong>
+            <span style={{ color: "#94a3b8", marginLeft: 6 }}>
+              (real modules: ~35–40 mm)
+            </span>
+          </label>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            value={panelThicknessMm}
+            onChange={(e) => setPanelThicknessMm(parseInt(e.target.value, 10))}
+            style={{ width: "100%" }}
+          />
         </div>
       )}
 

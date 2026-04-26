@@ -4,7 +4,10 @@ import { useMemo } from "react";
 import { useLoader } from "@react-three/fiber";
 import * as THREE from "three";
 
+import { buildSidesGeometry } from "./panelGeometry";
+
 const PANEL_TEXTURE_URL = "/textures/panel.png";
+const FRAME_COLOR = "#1f2937";   // dark grey for sides + backsheet
 
 /**
  * UVs for one panel's two triangles. The triangles are emitted as
@@ -45,7 +48,7 @@ function uvsForPanel(longSideAlongV) {
  * regardless of panel count. The texture is sampled per-panel via UVs so the
  * cell grid + frame look right at any zoom level.
  */
-export default function PanelOverlay({ panels = [] }) {
+export default function PanelOverlay({ panels = [], thicknessM = 0 }) {
   const texture = useLoader(THREE.TextureLoader, PANEL_TEXTURE_URL);
   // One-time texture setup. Idempotent: useLoader caches the texture, so
   // these flags persist across re-renders.
@@ -87,16 +90,33 @@ export default function PanelOverlay({ panels = [] }) {
     return g;
   }, [panels]);
 
+  const sidesGeometry = useMemo(
+    () => buildSidesGeometry(panels, thicknessM),
+    [panels, thicknessM],
+  );
+
   if (!geometry) return null;
 
   return (
-    <mesh geometry={geometry}>
-      <meshStandardMaterial
-        map={texture}
-        side={THREE.DoubleSide}
-        metalness={0.5}
-        roughness={0.35}
-      />
-    </mesh>
+    <group>
+      <mesh geometry={geometry}>
+        <meshStandardMaterial
+          map={texture}
+          side={THREE.DoubleSide}
+          metalness={0.5}
+          roughness={0.35}
+        />
+      </mesh>
+      {sidesGeometry && (
+        <mesh geometry={sidesGeometry}>
+          <meshStandardMaterial
+            color={FRAME_COLOR}
+            side={THREE.DoubleSide}
+            metalness={0.6}
+            roughness={0.4}
+          />
+        </mesh>
+      )}
+    </group>
   );
 }

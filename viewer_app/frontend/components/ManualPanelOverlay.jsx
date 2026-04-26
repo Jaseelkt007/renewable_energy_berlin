@@ -4,6 +4,10 @@ import { useMemo } from "react";
 import { useLoader } from "@react-three/fiber";
 import * as THREE from "three";
 
+import { buildSidesGeometry } from "./panelGeometry";
+
+const FRAME_COLOR = "#1f2937";
+
 /**
  * Renders the small set of panels that need a per-panel color: manual
  * (committed user-added), candidate (preview), rejected (flash), selected
@@ -67,6 +71,7 @@ export default function ManualPanelOverlay({
   source = "manual",
   onPanelClick,
   clickable = false,
+  thicknessM = 0,
 }) {
   const texture = useLoader(THREE.TextureLoader, PANEL_TEXTURE_URL);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -105,8 +110,26 @@ export default function ManualPanelOverlay({
   const color = COLORS[source] || COLORS.manual;
   const isTransparent = TRANSPARENT_SOURCES.has(source);
 
+  // Sides only render for committed textured panels — transient UI states
+  // (candidate, rejected, selected) stay perfectly flat so the color signal
+  // is unambiguous.
+  const sidesGeometry = useMemo(
+    () => (textured ? buildSidesGeometry(panels, thicknessM) : null),
+    [panels, thicknessM, textured],
+  );
+
   return (
     <group>
+      {sidesGeometry && (
+        <mesh geometry={sidesGeometry}>
+          <meshStandardMaterial
+            color={FRAME_COLOR}
+            side={THREE.DoubleSide}
+            metalness={0.6}
+            roughness={0.4}
+          />
+        </mesh>
+      )}
       {meshes.map(({ id, geometry }) => (
         <mesh
           key={id}
