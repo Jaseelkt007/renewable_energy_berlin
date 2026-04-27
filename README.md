@@ -9,11 +9,19 @@
 
 ---
 
+## Watch the 90-second demo
+
+[![Powerly — AI Renewable Energy Designer](https://img.youtube.com/vi/t4WCYRkyPMQ/maxresdefault.jpg)](https://youtu.be/t4WCYRkyPMQ)
+
+> Click the thumbnail to play on YouTube → https://youtu.be/t4WCYRkyPMQ
+
+---
+
 ## Live demo
 
 - **Frontend:** https://lovable.dev/projects/a6628333-eca9-4ea3-83cf-e26f6e95c663?magic_link=mc_0e2e2808-216c-48c4-a4b5-9b74be133d70
 - **Backend:** https://github.com/Jaseelkt007/renewable_energy_berlin.git
-- **Backup video:** https://youtu.be/oWEK9x9QRRM
+- **Demo video:** https://youtu.be/t4WCYRkyPMQ
 
 ---
 
